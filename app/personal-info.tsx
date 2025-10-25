@@ -11,7 +11,7 @@ export default function PersonalInformationScreen() {
       <View style={styles.topArc} />
 
       {/* Back Button */}
-     <TouchableOpacity style={styles.backButton} onPress={() => router.push('/tabs/admin-profile')}>
+     <TouchableOpacity style={styles.backButton} onPress={() => router.push('/admin/tabs/admin-profile')}>
      <Ionicons name="arrow-back" size={24} color="#fff" />
      </TouchableOpacity>
 

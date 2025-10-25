@@ -2,7 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Tabs } from 'expo-router';
 import { Platform, StyleSheet, View } from 'react-native';
 
-export default function TabLayout() {
+export default function GuestTabLayout() {
   return (
     <Tabs
       screenOptions={({ route }) => ({
@@ -14,17 +14,11 @@ export default function TabLayout() {
           let iconName: keyof typeof Ionicons.glyphMap = 'home';
 
           switch (route.name) {
-            case 'admin-home':
+            case 'guest-home':
               iconName = 'home';
-              break;
-            case 'logs':
-              iconName = 'document-text';
               break;
             case 'connect-instructions':
               iconName = 'hardware-chip-outline';
-              break;
-            case 'admin-profile':
-              iconName = 'person';
               break;
           }
 
@@ -38,10 +32,8 @@ export default function TabLayout() {
         },
       })}
     >
-      <Tabs.Screen name="admin-home" />
-      <Tabs.Screen name="logs" />
+      <Tabs.Screen name="guest-home" />
       <Tabs.Screen name="connect-instructions" />
-      <Tabs.Screen name="admin-profile" />
     </Tabs>
   );
 }

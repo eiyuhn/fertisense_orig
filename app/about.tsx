@@ -12,7 +12,7 @@ export default function AboutScreen() {
 
       <TouchableOpacity
         style={styles.backButton}
-        onPress={() => router.push('/tabs/admin-profile')}
+        onPress={() => router.push('/admin/tabs/admin-profile')}
       >
         <Ionicons name="arrow-back" size={24} color="#fff" />
       </TouchableOpacity>

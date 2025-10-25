@@ -1,50 +1,61 @@
 {
   "expo": {
-    "name": "Fertisense",
+    "name": "FertiSense",
     "slug": "fertisense",
+    "scheme": "fertisense",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/splash-logo.png",
-    "scheme": "fertisense",
-    "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
-    "ios": {
-      "supportsTablet": true
+
+    "icon": "./assets/images/icon.png",
+    "splash": {
+      "image": "./assets/images/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
     },
-    "android": {
-      "adaptiveIcon": {
-        "foregroundImage": "./assets/images/splash-logo.png",
-        "backgroundColor": "#ffffff"
-      },
-      "edgeToEdgeEnabled": true,
-      "package": "com.fertisense.soilsensor"
-    },
-    "web": {
-      "bundler": "metro",
-      "output": "static",
-      "favicon": "./assets/images/splash-logo.png"
-    },
+
     "plugins": [
       "expo-router",
       [
-        "expo-splash-screen",
-        {
-          "image": "./assets/images/splash-logo.png",
-          "resizeMode": "contain",
-          "backgroundColor": "#ffffff"
-        }
-      ],
-      "expo-web-browser",
-      "expo-font"
+        "react-native-wifi-reborn",
+        { "isLocationRequired": true }
+      ]
     ],
-    "experiments": {
-      "typedRoutes": true
-    },
-    "extra": {
-      "router": {},
-      "eas": {
-        "projectId": "3fcfe061-80ca-460c-8b1d-5186776c7401"
+
+    "android": {
+      "package": "com.iannnn.fertisense",
+      "usesCleartextTraffic": true,
+      "permissions": [
+        "INTERNET",
+        "ACCESS_NETWORK_STATE",
+        "ACCESS_WIFI_STATE",
+        "CHANGE_WIFI_STATE",
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION",
+        "NEARBY_WIFI_DEVICES"
+      ],
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
       }
+    },
+
+    "ios": {
+      "supportsTablet": false,
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Location access is needed to help connect to the ESP32 sensor Wi-Fi."
+      }
+    },
+
+    "assetBundlePatterns": ["**/*"],
+
+    "extra": {
+      "eas": {
+        "projectId": "00000000-0000-0000-0000-000000000000"
+      }
+    },
+
+    "updates": {
+      "fallbackToCacheTimeout": 0
     }
   }
 }

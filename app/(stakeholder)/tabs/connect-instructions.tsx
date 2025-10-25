@@ -1,6 +1,8 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { useRouter, useLocalSearchParams } from 'expo-router';
+import React, { useState } from 'react';
 import {
+  Alert,
   Image,
   ScrollView,
   StyleSheet,
@@ -8,16 +10,40 @@ import {
   TouchableOpacity,
   View
 } from 'react-native';
+import { connectToESP } from '../../../src/esp32';
 
 export default function ConnectInstructionsScreen() {
   const router = useRouter();
+  const { farmerId } = useLocalSearchParams<{ farmerId?: string }>();
+  const [busy, setBusy] = useState(false);
+
+  async function onConnect() {
+    try {
+      setBusy(true);
+      const ok = await connectToESP();
+      if (!ok) {
+        Alert.alert(
+          'Hindi makakonekta',
+          'Tiyaking konektado sa Wi-Fi “ESP32-NPK” (password: fertisense), i-ON ang Location (Android), patayin muna ang mobile data, at subukang muli.'
+        );
+        return;
+      }
+      router.push({
+        // stakeholder select-options lives under the route group
+        pathname: '/(stakeholder)/screens/select-options' as const,
+        params: { farmerId: String(farmerId ?? '') },
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
       {/* Back Button */}
-    <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
-      <Ionicons name="arrow-back" size={24} color="#333" />
-    </TouchableOpacity>
+      <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
+        <Ionicons name="arrow-back" size={24} color="#333" />
+      </TouchableOpacity>
 
       {/* Logo */}
       <Image
@@ -25,8 +51,6 @@ export default function ConnectInstructionsScreen() {
         style={styles.logo}
         resizeMode="contain"
       />
-
-
 
       {/* Title */}
       <Text style={styles.title}>Connect to Device</Text>
@@ -56,7 +80,7 @@ export default function ConnectInstructionsScreen() {
               style={styles.iconBluetooth}
             />
           </View>
-          <Text style={styles.stepText}>Buksan ang Bluetooth ng iyong cellphone.</Text>
+          <Text style={styles.stepText}>Buksan ang Wi-Fi / Location ng iyong cellphone.</Text>
         </View>
 
         {/* Step 3 */}
@@ -98,12 +122,8 @@ export default function ConnectInstructionsScreen() {
       </View>
 
       {/* Proceed Button */}
-      <TouchableOpacity
-        style={styles.button}
-        onPress={() => router.push('/(stakeholder)/screens/select-options')}
-        
-      >
-        <Text style={styles.buttonText}>Connect</Text>
+      <TouchableOpacity style={styles.button} onPress={onConnect} disabled={busy}>
+        <Text style={styles.buttonText}>{busy ? 'Connecting…' : 'Connect'}</Text>
       </TouchableOpacity>
     </ScrollView>
   );
@@ -169,31 +189,11 @@ const styles = StyleSheet.create({
     flex: 1,
     flexWrap: 'wrap',
   },
-  iconPower: {
-    width: 25,
-    height: 25,
-    resizeMode: 'contain',
-  },
-  iconBluetooth: {
-    width: 24,
-    height: 24,
-    resizeMode: 'contain',
-  },
-  iconSensor: {
-    width: 30,
-    height: 30,
-    resizeMode: 'contain',
-  },
-  iconRiceType: {
-    width: 20,
-    height: 27,
-    resizeMode: 'contain',
-  },
-  iconCheck: {
-    width: 30,
-    height: 40,
-    resizeMode: 'contain',
-  },
+  iconPower: { width: 25, height: 25, resizeMode: 'contain' },
+  iconBluetooth: { width: 24, height: 24, resizeMode: 'contain' },
+  iconSensor: { width: 30, height: 30, resizeMode: 'contain' },
+  iconRiceType: { width: 20, height: 27, resizeMode: 'contain' },
+  iconCheck: { width: 30, height: 40, resizeMode: 'contain' },
   button: {
     backgroundColor: '#2e7d32',
     paddingVertical: 13,
@@ -201,9 +201,5 @@ const styles = StyleSheet.create({
     borderRadius: 50,
     alignSelf: 'center',
   },
-  buttonText: {
-    color: '#fff',
-    fontWeight: 'bold',
-    fontSize: 16,
-  },
+  buttonText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
 });

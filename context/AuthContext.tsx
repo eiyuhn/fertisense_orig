@@ -1,89 +1,176 @@
+// context/AuthContext.tsx
+// Auth with online-first behavior; persists token in SecureStore (via api.ts)
+
+import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
+import NetInfo from '@react-native-community/netinfo';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import React, { createContext, ReactNode, useContext, useEffect, useState } from 'react';
+import { api, setToken as setApiToken, loadToken as loadApiToken } from '../src/api';
+import type { User, LoginPayload, RegisterPayload } from '../src/services';
+import {
+  loadPendingRegistrations,
+  savePendingRegistrations,
+  loadPendingProfileUpdates,
+  savePendingProfileUpdates,
+} from '../src/authQueue';
 
-// 👤 User type definition
-export type User = {
-  name: string;
-  email?: string;
-  role: 'admin' | 'stakeholder' | 'guest';
-  address?: string;
-  farmLocation?: string;
-  mobile?: string;
-  profileImage?: string | null;
-};
+const KEY_TOKEN = 'auth:token'; // a cached copy (not the source of truth)
+const KEY_USER  = 'auth:user';
 
-// 🔒 Auth context type
 type AuthContextType = {
   user: User | null;
-  login: (userData: User) => void;
-  logout: () => void;
-  updateUser: (updatedFields: Partial<User>) => void;
+  token: string | null;
+  loading: boolean;
+  online: boolean;
+  login: (payload: LoginPayload) => Promise<{ user: User; token: string }>;
+  register: (payload: RegisterPayload) => Promise<{ user: User; token: string }>;
+  logout: () => Promise<void>;
+  refreshMe: () => Promise<void>;
+  updateUser: (fields: Partial<User>) => Promise<void>;
+  setUser: React.Dispatch<React.SetStateAction<User | null>>;
 };
 
-// 📦 Create the context
-const AuthContext = createContext<AuthContextType | undefined>(undefined);
+const AuthContext = createContext<AuthContextType>({
+  user: null,
+  token: null,
+  loading: true,
+  online: true,
+  login: async () => ({ user: {} as User, token: '' }),
+  register: async () => ({ user: {} as User, token: '' }),
+  logout: async () => {},
+  refreshMe: async () => {},
+  updateUser: async () => {},
+  setUser: () => {},
+});
 
-// 🧠 AuthProvider component
-export const AuthProvider = ({ children }: { children: ReactNode }) => {
+export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
+  const [token, setToken] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [online, setOnline] = useState(true);
 
-  // 📥 Load user from AsyncStorage on mount
+  // Connectivity
   useEffect(() => {
-    const loadUser = async () => {
-      try {
-        const storedUser = await AsyncStorage.getItem('user');
-        if (storedUser) {
-          setUser(JSON.parse(storedUser));
-        }
-      } catch (error) {
-        console.error('Failed to load user from AsyncStorage:', error);
-      }
-    };
-
-    loadUser();
+    const sub = NetInfo.addEventListener(state => {
+      const isOnline = !!state.isConnected && !!state.isInternetReachable;
+      setOnline(isOnline);
+    });
+    NetInfo.fetch().then(state => {
+      const isOnline = !!state.isConnected && !!state.isInternetReachable;
+      setOnline(isOnline);
+    });
+    return () => sub && sub();
   }, []);
 
-  // 🔐 Login
-  const login = async (userData: User) => {
-    try {
-      setUser(userData);
-      await AsyncStorage.setItem('user', JSON.stringify(userData));
-    } catch (error) {
-      console.error('Login failed:', error);
-    }
+  // Load cached session + restore API header
+  useEffect(() => {
+    (async () => {
+      try {
+        await loadApiToken(); // restore axios Authorization from SecureStore
+        const [t, u] = await Promise.all([
+          AsyncStorage.getItem(KEY_TOKEN),
+          AsyncStorage.getItem(KEY_USER),
+        ]);
+        if (t) setToken(t);
+        if (u) setUser(JSON.parse(u));
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
+
+  const persistSession = async (u: User, t: string) => {
+    setUser(u);
+    setToken(t);
+    await setApiToken(t); // write to SecureStore + axios defaults
+    await AsyncStorage.setItem(KEY_USER, JSON.stringify(u));
+    await AsyncStorage.setItem(KEY_TOKEN, t); // cached copy for quick reads
   };
 
-  // 🔓 Logout
+  const clearSession = async () => {
+    setUser(null);
+    setToken(null);
+    await setApiToken(undefined); // clears SecureStore + axios header
+    await AsyncStorage.removeItem(KEY_USER);
+    await AsyncStorage.removeItem(KEY_TOKEN);
+  };
+
+  // ------------ Auth ------------
+  const login: AuthContextType['login'] = async (payload) => {
+    if (!online) {
+      throw new Error('You are offline. Please connect to the internet to log in.');
+    }
+    const res = await api.post('/api/auth/login', payload);
+    await persistSession(res.data.user, res.data.token);
+    return { user: res.data.user as User, token: res.data.token as string };
+  };
+
+  const register: AuthContextType['register'] = async (payload) => {
+    if (!online) {
+      // queue for later, but still return a local session (no token)
+      const q = await loadPendingRegistrations();
+      q.push({ payload, createdAt: new Date().toISOString() });
+      await savePendingRegistrations(q);
+
+      const tempUser: User = {
+        _id: undefined,
+        name: payload.name,
+        email: payload.email,
+        role: payload.role || 'stakeholder',
+        address: payload.address,
+        farmLocation: payload.farmLocation,
+        mobile: payload.mobile,
+      };
+      setUser(tempUser);
+      setToken(null);
+      await AsyncStorage.setItem(KEY_USER, JSON.stringify(tempUser));
+      await AsyncStorage.removeItem(KEY_TOKEN);
+      return { user: tempUser, token: '' };
+    }
+
+    const res = await api.post('/api/auth/register', payload);
+    await persistSession(res.data.user, res.data.token);
+    return { user: res.data.user as User, token: res.data.token as string };
+  };
+
   const logout = async () => {
-    try {
-      setUser(null);
-      await AsyncStorage.removeItem('user');
-    } catch (error) {
-      console.error('Logout failed:', error);
+    await clearSession();
+  };
+
+  const refreshMe = async () => {
+    if (!token || !online) return;
+    const res = await api.get('/api/auth/me');
+    if (res.data) {
+      setUser(res.data);
+      await AsyncStorage.setItem(KEY_USER, JSON.stringify(res.data));
     }
   };
 
-  // 🔄 Update user
-  const updateUser = async (updatedFields: Partial<User>) => {
-    setUser((prevUser) => {
-      if (!prevUser) return prevUser;
-
-      const updatedUser = { ...prevUser, ...updatedFields };
-      AsyncStorage.setItem('user', JSON.stringify(updatedUser));
-      return updatedUser;
-    });
+  const updateUser = async (fields: Partial<User>) => {
+    if (!online || !token) {
+      // online-only for now
+      return;
+    }
+    const res = await api.put('/api/auth/me', fields);
+    if (res.data) {
+      setUser(res.data);
+      await AsyncStorage.setItem(KEY_USER, JSON.stringify(res.data));
+    }
   };
 
-  return (
-    <AuthContext.Provider value={{ user, login, logout, updateUser }}>
-      {children}
-    </AuthContext.Provider>
-  );
-};
+  const value = useMemo<AuthContextType>(() => ({
+    user,
+    token,
+    loading,
+    online,
+    login,
+    register,
+    logout,
+    refreshMe,
+    updateUser,
+    setUser,
+  }), [user, token, loading, online]);
 
-// 🪝 Hook for consuming auth context
-export const useAuth = () => {
-  const context = useContext(AuthContext);
-  if (!context) throw new Error('useAuth must be used within an AuthProvider');
-  return context;
-};
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+}
+
+export const useAuth = () => useContext(AuthContext);

@@ -2,7 +2,7 @@ import * as FileSystem from 'expo-file-system';
 import * as Print from 'expo-print';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import * as Sharing from 'expo-sharing';
-import React, { useEffect } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import {
   Alert,
   Image,
@@ -12,14 +12,38 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+
 import { useData } from '../../../context/DataContext';
 import { FertilizerPrices, useFertilizer } from '../../../context/FertilizerContext';
+
+// 🔗 NEW: backend hooks
+import { useAuth } from '../../../context/AuthContext';
+import { addReading, getFarmer } from '../../../src/services';
+
+/* -------------------- Utils (idempotency) -------------------- */
+async function getLastKey() {
+  try {
+    const v = await FileSystem.readAsStringAsync(FileSystem.documentDirectory + 'lastReadingKey.txt');
+    return v || '';
+  } catch {
+    return '';
+  }
+}
+async function setLastKey(key: string) {
+  try {
+    await FileSystem.writeAsStringAsync(FileSystem.documentDirectory + 'lastReadingKey.txt', key);
+  } catch {}
+}
+function makeKey(farmerId: string, dateISO: string, n: number, p: number, k: number, ph?: number) {
+  return `${farmerId}|${dateISO}|${n}|${p}|${k}|${ph ?? ''}`;
+}
 
 export default function RecommendationScreen() {
   const router = useRouter();
   const { prices: fertilizerPrices } = useFertilizer();
-  const { addReading, readings } = useData();
+  const { addReading: addLocalReading, readings } = useData();
 
+  // ⬇️ params coming from previous screen
   const params = useLocalSearchParams();
   const nameStr = (params.name ?? '') as string;
   const codeStr = (params.code ?? '') as string;
@@ -27,7 +51,15 @@ export default function RecommendationScreen() {
   const pValue = parseFloat((params.p ?? '0') as string);
   const kValue = parseFloat((params.k ?? '0') as string);
   const phValue = parseFloat((params.ph ?? '0') as string) || 6.5;
+  const paramFarmerId = (params.farmerId ?? '') as string; // may be '' if not passed
 
+  // 🔐 auth/online
+  const { token, online } = useAuth();
+
+  // local de-dup guard to avoid re-posting
+  const postedRef = useRef(false);
+
+  // ---------------- Prices (unchanged) ----------------
   const fallbackPrices: FertilizerPrices = {
     urea: 25,
     ssp: 20,
@@ -35,15 +67,12 @@ export default function RecommendationScreen() {
     dap: 30,
     npk: 27,
   };
-
   const prices: FertilizerPrices = { ...fallbackPrices, ...fertilizerPrices };
-
   const fertilizerAmounts: Record<string, Partial<FertilizerPrices>> = {
     plan1: { urea: 261, ssp: 193, mop: 197 },
     plan2: { dap: 70, urea: 247, mop: 197 },
     plan3: { npk: 179, urea: 226, mop: 149 },
   };
-
   const totalPrice = (items: Partial<FertilizerPrices>) => {
     return Object.entries(items).reduce((sum, [key, amount]) => {
       const price = prices[key as keyof FertilizerPrices] ?? 0;
@@ -51,15 +80,15 @@ export default function RecommendationScreen() {
     }, 0);
   };
 
+  // ---------------- Text (unchanged) ----------------
   const recommendationText =
     'Mababa ang Phosphorus ng lupa. Katamtaman ang Nitrogen at Potassium. Inirerekomenda naming magdagdag ng abono na may mataas na Phosphorus tulad ng Superphosphate.';
   const englishText =
     'The soil is low in Phosphorus. Nitrogen and Potassium are medium. We recommend applying fertilizer with high Phosphorus like Superphosphate.';
-
   const phStatus =
     phValue < 5.5 ? 'Acidic' : phValue > 7.5 ? 'Alkaline' : 'Neutral';
 
-  // ✅ Save reading automatically
+  // ---------------- Auto-save to local context (unchanged) ----------------
   useEffect(() => {
     const today = new Date().toLocaleDateString();
 
@@ -99,11 +128,64 @@ export default function RecommendationScreen() {
     );
 
     if (!exists && nameStr && codeStr) {
-      addReading(data);
+      addLocalReading(data);
     }
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // 📄 PDF export
+  // ---------------- NEW: Save to backend readings ----------------
+  useEffect(() => {
+    if (postedRef.current) return;
+    postedRef.current = true; // run once per mount
+
+    (async () => {
+      // Only attempt if we have internet + logged in
+      if (!online || !token) return;
+
+      // Resolve backend farmer id:
+      // 1) Prefer explicit farmerId from params
+      // 2) Else, try look up by code
+      let backendFarmerId = (paramFarmerId || '').trim();
+
+      if (!backendFarmerId && codeStr) {
+        try {
+          const farmer = await getFarmer({ code: codeStr }, token);
+          if (farmer?._id) backendFarmerId = farmer._id;
+        } catch {
+          // lookup failed; skip backend write quietly
+          return;
+        }
+      }
+      if (!backendFarmerId) return; // nothing to write to
+
+      // Idempotency guard (local simple key)
+      const todayISO = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+      const key = makeKey(backendFarmerId, todayISO, nValue, pValue, kValue, phValue);
+      const last = await getLastKey();
+      if (last === key) return;
+
+      try {
+        await addReading(
+          {
+            farmerId: backendFarmerId,
+            npk: { N: nValue, P: pValue, K: kValue },
+            ph: isFinite(phValue) ? phValue : null,
+            source: 'esp32',
+          },
+          token
+        );
+        await setLastKey(key);
+      } catch (e: any) {
+        // Non-blocking: show a soft hint only if it looks like auth
+        const msg = e?.response?.data?.error || e?.message || '';
+        if (/401|unauthor/i.test(msg)) {
+          Alert.alert('Login required', 'Please log in again to save readings to the server.');
+        }
+        // otherwise ignore; user still sees recommendations
+      }
+    })();
+  }, [online, token, paramFarmerId, codeStr, nValue, pValue, kValue, phValue]);
+
+  // ---------------- PDF generation (unchanged) ----------------
   const handleSavePDF = async () => {
     const today = new Date();
     const formattedDate = today.toISOString().split('T')[0];
@@ -166,11 +248,7 @@ export default function RecommendationScreen() {
     `;
 
     try {
-      const { uri } = await Print.printToFileAsync({
-        html: htmlContent,
-        base64: false,
-      });
-
+      const { uri } = await Print.printToFileAsync({ html: htmlContent, base64: false });
       const newPath = `${FileSystem.documentDirectory}${fileName}`;
       await FileSystem.moveAsync({ from: uri, to: newPath });
 
@@ -276,6 +354,7 @@ export default function RecommendationScreen() {
   );
 }
 
+/* -------------------- Styles (unchanged) -------------------- */
 const styles = StyleSheet.create({
   container: {
     padding: 23,

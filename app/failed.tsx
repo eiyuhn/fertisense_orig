@@ -21,7 +21,7 @@ export default function FailedScreen() {
       <Text style={styles.resultText}>Failed to connect</Text>
 
       {/* Retry Button */}
-      <TouchableOpacity style={styles.button} onPress={() => router.replace('/connect')}>
+      <TouchableOpacity style={styles.button} onPress={() => router.replace('../tabs/connect-instructions')}>
         <Text style={styles.buttonText}>Try Again</Text>
       </TouchableOpacity>
     </View>

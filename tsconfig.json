@@ -11,7 +11,7 @@
   "include": [
     "**/*.ts",
     "**/*.tsx",
-    ".expo/types/**/*.ts",
-    "expo-env.d.ts"
-, "app/tabs", "app/(stakeholder)/support.modal"  ]
+    "app/admin/tabs",
+    "app/(stakeholder)/support.modal"
+  ]
 }
