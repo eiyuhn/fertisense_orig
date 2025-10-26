@@ -1,4 +1,4 @@
-package com.donna.fertisense
+package com.iannnn.fertisense
 
 import android.app.Application
 import android.content.res.Configuration

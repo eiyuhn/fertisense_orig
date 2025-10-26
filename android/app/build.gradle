@@ -87,9 +87,9 @@ android {
     buildToolsVersion rootProject.ext.buildToolsVersion
     compileSdk rootProject.ext.compileSdkVersion
 
-    namespace 'com.donna.fertisense'
+    namespace 'com.iannnn.fertisense'
     defaultConfig {
-        applicationId 'com.donna.fertisense'
+        applicationId 'com.iannnn.fertisense'
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1

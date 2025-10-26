@@ -2,16 +2,12 @@
   "extends": "expo/tsconfig.base",
   "compilerOptions": {
     "strict": true,
-    "paths": {
-      "@/*": [
-        "./*"
-      ]
-    }
+    "skipLibCheck": true,               // <— avoids noise from dependency .d.ts
+    "paths": { "@/*": ["./*"] },
+    "types": ["react", "react-native"]  // <— keep TS focused on RN/React types
   },
   "include": [
     "**/*.ts",
-    "**/*.tsx",
-    "app/admin/tabs",
-    "app/(stakeholder)/support.modal"
+    "**/*.tsx"
   ]
 }

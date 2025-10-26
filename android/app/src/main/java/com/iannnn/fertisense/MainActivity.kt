@@ -1,4 +1,4 @@
-package com.donna.fertisense
+package com.iannnn.fertisense
 import expo.modules.splashscreen.SplashScreenManager
 
 import android.os.Build
