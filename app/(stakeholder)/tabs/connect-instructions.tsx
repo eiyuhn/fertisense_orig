@@ -1,205 +1,211 @@
+// app/(stakeholder)/screens/connect-instructions.tsx
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import React, { useState } from 'react';
 import {
-  Alert,
-  Image,
   ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
-  View
+  View,
+  Image,
+  ActivityIndicator,
+  Alert,
 } from 'react-native';
-import { connectToESP } from '../../../src/esp32';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { autoConnectToESP32, ESP_SSID } from '../../../src/esp32';
 
 export default function ConnectInstructionsScreen() {
   const router = useRouter();
   const { farmerId } = useLocalSearchParams<{ farmerId?: string }>();
   const [busy, setBusy] = useState(false);
+  const [statusMessage, setStatusMessage] = useState('');
+  const insets = useSafeAreaInsets();
 
-  async function onConnect() {
+  async function handleConnect() {
+    if (busy) return;
+    setBusy(true);
+    setStatusMessage(`Connecting to ${ESP_SSID}...`);
     try {
-      setBusy(true);
-      const ok = await connectToESP();
-      if (!ok) {
-        Alert.alert(
-          'Hindi makakonekta',
-          'Tiyaking konektado sa Wi-Fi “ESP32-NPK” (password: fertisense), i-ON ang Location (Android), patayin muna ang mobile data, at subukang muli.'
-        );
-        return;
-      }
+      await autoConnectToESP32();
+      setStatusMessage('Connected successfully!');
+      await new Promise((r) => setTimeout(r, 800));
+
       router.push({
-        // stakeholder select-options lives under the route group
         pathname: '/(stakeholder)/screens/select-options' as const,
         params: { farmerId: String(farmerId ?? '') },
       });
+    } catch (err: any) {
+      setStatusMessage('');
+      Alert.alert(
+        'Connection Error',
+        err?.message ||
+          `Could not connect to ${ESP_SSID}. Please check Wi-Fi, enable Location (Android), turn off mobile data, and try again.`
+      );
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <ScrollView contentContainerStyle={styles.container}>
-      {/* Back Button */}
-      <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
-        <Ionicons name="arrow-back" size={24} color="#333" />
-      </TouchableOpacity>
+    <SafeAreaView style={styles.safe} edges={['top', 'left', 'right', 'bottom']}>
+      <ScrollView
+        style={styles.container}
+        contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + 40 }]}
+      >
+       
 
-      {/* Logo */}
-      <Image
-        source={require('../../../assets/images/fertisense-logo.png')}
-        style={styles.logo}
-        resizeMode="contain"
-      />
+        {/* Logo */}
+        <Image
+          source={require('../../../assets/images/fertisense-logo.png')}
+          style={styles.logo}
+          resizeMode="contain"
+        />
 
-      {/* Title */}
-      <Text style={styles.title}>Connect to Device</Text>
+        {/* Title */}
+        <Text style={styles.title}>Connect to Device</Text>
 
-      {/* Instruction Box */}
-      <View style={styles.box}>
-        <Text style={styles.boxIntro}>
-          Bago makita ang datos, ikonekta muna ang device sa iyong cellphone.
-        </Text>
-
-        {/* Step 1 */}
-        <View style={styles.stepRow}>
-          <View style={styles.iconWrapper}>
-            <Image
-              source={require('../../../assets/images/power.png')}
-              style={styles.iconPower}
-            />
-          </View>
-          <Text style={styles.stepText}>I-on ang iyong sensor device.</Text>
-        </View>
-
-        {/* Step 2 */}
-        <View style={styles.stepRow}>
-          <View style={styles.iconWrapper}>
-            <Image
-              source={require('../../../assets/images/bluetooth.png')}
-              style={styles.iconBluetooth}
-            />
-          </View>
-          <Text style={styles.stepText}>Buksan ang Wi-Fi / Location ng iyong cellphone.</Text>
-        </View>
-
-        {/* Step 3 */}
-        <View style={styles.stepRow}>
-          <View style={styles.iconWrapper}>
-            <Image
-              source={require('../../../assets/images/sensor.png')}
-              style={styles.iconSensor}
-            />
-          </View>
-          <Text style={styles.stepText}>Pindutin ang ‘Connect’ upang hanapin ang device.</Text>
-        </View>
-
-        {/* Step 4 */}
-        <View style={styles.stepRow}>
-          <View style={styles.iconWrapper}>
-            <Image
-              source={require('../../../assets/images/rice.png')}
-              style={styles.iconRiceType}
-            />
-          </View>
-          <Text style={styles.stepText}>
-            Pumili kung anong uri ng palay ang iyong itatanim.
+        {/* Instruction card */}
+        <View style={styles.card}>
+          <Text style={styles.lead}>
+            Bago makita ang datos, ikonekta muna ang device sa iyong cellphone.
           </Text>
-        </View>
 
-        {/* Step 5 */}
-        <View style={styles.stepRow}>
-          <View style={styles.iconWrapper}>
-            <Image
-              source={require('../../../assets/images/check.png')}
-              style={styles.iconCheck}
-            />
-          </View>
-          <Text style={styles.stepText}>
-            Hintaying kumonekta o makita ang ‘Successful’ na status.
-          </Text>
-        </View>
-      </View>
+          {/* Step list */}
+          <InstructionRow icon="power" text="I-on ang iyong sensor device." />
+          <InstructionRow icon="wifi" text="Buksan ang Wi-Fi / Location ng iyong cellphone." />
+          <InstructionRow icon="swap-horizontal" text="Pindutin ang ‘Connect’ upang hanapin ang device." />
+          <InstructionRow icon="leaf" text="Ilagay ang sensor sa lupa para sa susunod na hakbang." />
+          <InstructionRow icon="checkmark-circle" text="Hintaying kumonekta o makita ang ‘Successful’ na status." />
 
-      {/* Proceed Button */}
-      <TouchableOpacity style={styles.button} onPress={onConnect} disabled={busy}>
-        <Text style={styles.buttonText}>{busy ? 'Connecting…' : 'Connect'}</Text>
-      </TouchableOpacity>
-    </ScrollView>
+          {/* Connect button */}
+          <TouchableOpacity
+            style={[styles.cta, busy && styles.ctaDisabled]}
+            onPress={handleConnect}
+            disabled={busy}
+            activeOpacity={0.85}
+          >
+            {busy ? (
+              <>
+                <ActivityIndicator color="#fff" style={{ marginRight: 8 }} />
+                <Text style={styles.ctaText}>Connecting…</Text>
+              </>
+            ) : (
+              <>
+                <Ionicons name="wifi" size={20} color="#fff" style={{ marginRight: 6 }} />
+                <Text style={styles.ctaText}>Connect</Text>
+              </>
+            )}
+          </TouchableOpacity>
+
+          {/* Status Message */}
+          {statusMessage !== '' && (
+            <Text style={styles.statusText}>{statusMessage}</Text>
+          )}
+        </View>
+      </ScrollView>
+    </SafeAreaView>
   );
 }
 
+/** Reusable step row */
+function InstructionRow({
+  icon,
+  text,
+}: {
+  icon: keyof typeof Ionicons.glyphMap;
+  text: string;
+}) {
+  return (
+    <View style={rowStyles.row}>
+      <View style={rowStyles.bullet}>
+        <Ionicons name={icon} size={20} color="#2e7d32" />
+      </View>
+      <Text style={rowStyles.text}>{text}</Text>
+    </View>
+  );
+}
+
+/* Theme colors */
+const GREEN = '#2e7d32';
+
 const styles = StyleSheet.create({
-  container: {
-    padding: 24,
-    backgroundColor: '#fff',
-    flexGrow: 1,
+  safe: { flex: 1, backgroundColor: '#ffffff' },
+  container: { flex: 1, backgroundColor: '#ffffff' },
+  content: {
     alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingTop: 70,
   },
-  backButton: {
+
+  back: {
     position: 'absolute',
-    top: 55,
-    left: 20,
+    top: 22,
+    left: 16,
     zIndex: 10,
+    backgroundColor: '#ffffff',
+    borderRadius: 20,
+    padding: 6,
+    elevation: 2,
   },
-  logo: {
-    width: 190,
-    height: 180,
-    marginBottom: -20,
-    marginTop: 10,
-    top: 10,
-  },
-  title: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: '#2e7d32',
-    marginBottom: 15,
-  },
-  box: {
+
+  logo: { width: 200, height: 78, marginBottom: 10, marginTop: -40 },
+  title: { fontSize: 20, fontWeight: '700', color: GREEN, marginBottom: 16 },
+
+  card: {
     width: '100%',
-    borderWidth: 1,
-    borderColor: '#4CAF50',
-    borderRadius: 12,
-    padding: 19,
-    backgroundColor: '#f5fdf5',
-    marginBottom: 40,
+    backgroundColor: '#f7fbf7',
+    borderRadius: 18,
+    borderWidth: 2,
+    borderColor: GREEN,
+    padding: 18,
+    marginBottom: 28,
   },
-  boxIntro: {
-    fontSize: 17,
-    fontWeight: '600',
-    color: '#333',
-    marginBottom: 25,
-    marginTop: 5,
+  lead: {
+    fontSize: 14,
+    color: '#2b2b2b',
+    lineHeight: 20,
+    marginBottom: 14,
     textAlign: 'center',
   },
-  stepRow: {
+
+  cta: {
+    marginTop: 10,
+    width: '100%',
+    backgroundColor: GREEN,
+    borderRadius: 999,
+    paddingVertical: 14,
     flexDirection: 'row',
-    alignItems: 'flex-start',
-    marginBottom: 14,
+    justifyContent: 'center',
+    alignItems: 'center',
+    elevation: 3,
   },
-  iconWrapper: {
-    width: 35,
+  ctaDisabled: { backgroundColor: '#a5d6a7' },
+  ctaText: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: '700',
+    letterSpacing: 0.2,
+  },
+
+  statusText: {
+    textAlign: 'center',
+    color: GREEN,
+    fontSize: 13,
+    marginTop: 10,
+  },
+});
+
+const rowStyles = StyleSheet.create({
+  row: { flexDirection: 'row', alignItems: 'center', marginBottom: 14 },
+  bullet: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
     alignItems: 'center',
     justifyContent: 'center',
-    marginRight: 8,
+    backgroundColor: '#e8f2e8',
+    marginRight: 10,
   },
-  stepText: {
-    fontSize: 16,
-    color: '#444',
-    flex: 1,
-    flexWrap: 'wrap',
-  },
-  iconPower: { width: 25, height: 25, resizeMode: 'contain' },
-  iconBluetooth: { width: 24, height: 24, resizeMode: 'contain' },
-  iconSensor: { width: 30, height: 30, resizeMode: 'contain' },
-  iconRiceType: { width: 20, height: 27, resizeMode: 'contain' },
-  iconCheck: { width: 30, height: 40, resizeMode: 'contain' },
-  button: {
-    backgroundColor: '#2e7d32',
-    paddingVertical: 13,
-    paddingHorizontal: 100,
-    borderRadius: 50,
-    alignSelf: 'center',
-  },
-  buttonText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
+  text: { flex: 1, fontSize: 14, color: '#333', lineHeight: 20 },
 });

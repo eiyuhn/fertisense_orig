@@ -1,4 +1,4 @@
-// app/admin/tabs/farmer-logs.tsx
+// app/admin/tabs/logs.tsx
 import { Ionicons } from '@expo/vector-icons';
 import NetInfo from '@react-native-community/netinfo';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -13,6 +13,8 @@ import {
   Text,
   TouchableOpacity,
   View,
+  Platform,
+  StatusBar,
 } from 'react-native';
 
 import {
@@ -47,6 +49,11 @@ type Reading = {
   updatedAt?: string;
 };
 
+const GREEN = '#1b5e20';
+const CARD_BORDER = '#e7ece9';
+const TEXT_PRIMARY = '#1b1b1b';
+const TEXT_MUTED = '#636e65';
+
 const FARMERS_CACHE_KEY = 'fertisense:farmers';
 const READINGS_CACHE_PREFIX = 'fertisense:readings:'; // + farmerId
 
@@ -64,7 +71,9 @@ async function getFarmersCache(): Promise<Farmer[]> {
   }
 }
 async function setFarmersCache(farmers: Farmer[]): Promise<void> {
-  try { await AsyncStorage.setItem(FARMERS_CACHE_KEY, JSON.stringify(farmers)); } catch {}
+  try {
+    await AsyncStorage.setItem(FARMERS_CACHE_KEY, JSON.stringify(farmers));
+  } catch {}
 }
 async function getReadingsCache(fid: string): Promise<Reading[]> {
   try {
@@ -77,12 +86,14 @@ async function getReadingsCache(fid: string): Promise<Reading[]> {
   }
 }
 async function setReadingsCache(fid: string, readings: Reading[]): Promise<void> {
-  try { await AsyncStorage.setItem(READINGS_CACHE_PREFIX + fid, JSON.stringify(readings)); } catch {}
+  try {
+    await AsyncStorage.setItem(READINGS_CACHE_PREFIX + fid, JSON.stringify(readings));
+  } catch {}
 }
 async function removeFarmerFromCache(fid: string): Promise<void> {
   try {
     const list = await getFarmersCache();
-    const next = list.filter(f => getFarmerId(f) !== fid);
+    const next = list.filter((f) => getFarmerId(f) !== fid);
     await setFarmersCache(next);
     await AsyncStorage.removeItem(READINGS_CACHE_PREFIX + fid);
   } catch {}
@@ -105,13 +116,14 @@ export default function LogsScreen() {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [refreshing, setRefreshing] = useState(false);
   const [isOnline, setIsOnline] = useState<boolean | null>(null);
+  const [sortAsc, setSortAsc] = useState(true);
 
   useEffect(() => {
-    const sub = NetInfo.addEventListener(state => {
+    const sub = NetInfo.addEventListener((state) => {
       const online = !!state.isConnected && !!state.isInternetReachable;
       setIsOnline(online);
     });
-    NetInfo.fetch().then(state => {
+    NetInfo.fetch().then((state) => {
       const online = !!state.isConnected && !!state.isInternetReachable;
       setIsOnline(online);
     });
@@ -133,7 +145,7 @@ export default function LogsScreen() {
         localLatestMap[fid] = rsLocal[0] ?? null;
       }
       if (Object.keys(localLatestMap).length) {
-        setLatest(prev => ({ ...prev, ...localLatestMap }));
+        setLatest((prev) => ({ ...prev, ...localLatestMap }));
       }
 
       // online refresh
@@ -153,7 +165,9 @@ export default function LogsScreen() {
             await setReadingsCache(fid, rs);
           } catch {
             const rsLocal = await getReadingsCache(fid);
-            rsLocal.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+            rsLocal.sort(
+              (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+            );
             onlineLatestMap[fid] = rsLocal[0] ?? null;
           }
         }
@@ -174,17 +188,22 @@ export default function LogsScreen() {
     }, [loadFarmersAndLatest])
   );
 
-  const toggleExpand = (id: string) =>
-    setExpanded((s) => ({ ...s, [id]: !s[id] }));
+  const toggleExpand = (id: string) => setExpanded((s) => ({ ...s, [id]: !s[id] }));
 
   const onConnect = (f: Farmer) => {
     const fid = getFarmerId(f);
-    router.push({ pathname: '/admin/tabs/connect-instructions', params: { farmerId: fid } }); // use id, not code
+    router.push({
+      pathname: '/admin/tabs/connect-instructions',
+      params: { farmerId: fid, farmerName: f.name },
+    });
   };
 
   const onEdit = (f: Farmer) => {
     const fid = getFarmerId(f);
-    router.push({ pathname: '/admin/tabs/add-farmer', params: { edit: fid, ts: Date.now().toString() } });
+    router.push({
+      pathname: '/admin/tabs/add-farmer',
+      params: { edit: fid, ts: Date.now().toString() },
+    });
   };
 
   const onDeleteFarmer = (f: Farmer) => {
@@ -208,7 +227,10 @@ export default function LogsScreen() {
               await deleteFarmerApi(fid);
               Alert.alert('Deleted', `${f.name} removed.`);
             } catch (e: any) {
-              Alert.alert('Error', e?.response?.data?.error ?? e?.message ?? 'Failed to delete farmer online.');
+              Alert.alert(
+                'Error',
+                e?.response?.data?.error ?? e?.message ?? 'Failed to delete farmer online.'
+              );
             }
           } else {
             Alert.alert('Offline', 'Removed locally. It will remain removed in this device cache.');
@@ -239,13 +261,18 @@ export default function LogsScreen() {
               try {
                 let rs = await listReadingsApi(fid);
                 if (!Array.isArray(rs)) rs = [];
-                rs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+                rs.sort(
+                  (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+                );
                 await setReadingsCache(fid, rs);
                 setLatest((prev) => ({ ...prev, [fid]: rs[0] ?? null }));
               } catch {}
               Alert.alert('Deleted', 'Latest reading removed.');
             } catch (e: any) {
-              Alert.alert('Error', e?.response?.data?.error ?? e?.message ?? 'Failed to delete reading online.');
+              Alert.alert(
+                'Error',
+                e?.response?.data?.error ?? e?.message ?? 'Failed to delete reading online.'
+              );
             }
           } else {
             Alert.alert('Offline', 'Removed from local cache.');
@@ -255,6 +282,42 @@ export default function LogsScreen() {
     ]);
   };
 
+  const sortedFarmers = useMemo(() => {
+    const copy = [...farmers];
+    copy.sort((a, b) =>
+      sortAsc
+        ? a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+        : b.name.localeCompare(a.name, undefined, { sensitivity: 'base' })
+    );
+    return copy;
+  }, [farmers, sortAsc]);
+
+  const HeaderBar = () => (
+    <View style={styles.headerBar}>
+      <TouchableOpacity onPress={() => router.back()} style={styles.headerIcon}>
+        <Ionicons name="arrow-back" size={22} color="#fff" />
+      </TouchableOpacity>
+      <Text style={styles.headerTitle}>Farmer Logs</Text>
+      <TouchableOpacity
+        onPress={() => setSortAsc((s) => !s)}
+        style={[styles.headerIcon, { opacity: 0.95 }]}
+      >
+        <Ionicons name="swap-vertical" size={20} color="#fff" />
+        <Text style={styles.headerSortText}>A-Z</Text>
+      </TouchableOpacity>
+    </View>
+  );
+
+  const ListHeader = () => (
+    <View style={styles.listHeaderWrap}>
+      <HeaderBar />
+      <View style={styles.onlineRow}>
+        <View style={[styles.onlineDot, { backgroundColor: isOnline ? '#6ecf78' : '#ff6b6b' }]} />
+        <Text style={styles.onlineText}>{isOnline ? 'Online' : 'Offline cache'}</Text>
+      </View>
+    </View>
+  );
+
   const renderItem = ({ item: f }: { item: Farmer }) => {
     const fid = getFarmerId(f);
     const r = latest[fid];
@@ -262,60 +325,76 @@ export default function LogsScreen() {
 
     return (
       <View style={styles.card}>
+        {/* Header row */}
         <View style={styles.cardTop}>
-          <Text style={styles.farmerName}>👨‍🌾 {f.name}</Text>
-          <View style={styles.actions}>
-            <TouchableOpacity onPress={() => onEdit(f)}>
-              <Ionicons name="pencil" size={20} color="#2e7d32" />
+          <Text style={styles.farmerName}>👩‍🌾 {f.name}</Text>
+
+          {/* RIGHT ICONS: Reading (left) → Edit → Delete */}
+          <View style={styles.rightIcons}>
+            <TouchableOpacity onPress={() => onConnect(f)} style={styles.iconTap}>
+              <Ionicons name="scan-circle-outline" size={18} color={GREEN} />
             </TouchableOpacity>
-            <TouchableOpacity onPress={() => onConnect(f)}>
-              <Ionicons name="wifi" size={20} color="#2e7d32" />
+
+            <TouchableOpacity onPress={() => onEdit(f)} style={styles.iconTap}>
+              <Ionicons name="pencil" size={18} color={GREEN} />
             </TouchableOpacity>
-            <TouchableOpacity onPress={() => onDeleteFarmer(f)}>
-              <Ionicons name="trash" size={20} color="#c62828" />
+
+            <TouchableOpacity onPress={() => onDeleteFarmer(f)} style={styles.iconTap}>
+              <Ionicons name="trash" size={18} color="#d32f2f" />
             </TouchableOpacity>
           </View>
         </View>
 
-        <View style={{ marginTop: 6 }}>
-          {!!f.farmLocation && (
-            <Text style={styles.detail}>📍 Lokasyon: <Text style={styles.detailBold}>{f.farmLocation}</Text></Text>
-          )}
-          {!!f.farmSize && (
-            <Text style={styles.detail}>📐 Sukat: <Text style={styles.detailBold}>{f.farmSize} hectares</Text></Text>
-          )}
-          {!!f.palayType && (
-            <Text style={styles.detail}>🌾 Uri: <Text style={styles.detailBold}>{f.palayType}</Text></Text>
-          )}
-          {!!f.farmType && (
-            <Text style={styles.detail}>💧 Paraan: <Text style={styles.detailBold}>{f.farmType}</Text></Text>
-          )}
-        </View>
+        {/* Detail rows */}
+        {!!f.farmLocation && (
+          <Text style={styles.detailRow}>
+            📍 Lokasyon: <Text style={styles.bold}>{f.farmLocation}</Text>
+          </Text>
+        )}
+        {!!f.farmSize && (
+          <Text style={styles.detailRow}>
+            📏 Sukat: <Text style={styles.bold}>{f.farmSize} hectares</Text>
+          </Text>
+        )}
+        {!!f.palayType && (
+          <Text style={styles.detailRow}>
+            🌾 Uri: <Text style={styles.bold}>{f.palayType}</Text>
+          </Text>
+        )}
+        {!!f.farmType && (
+          <Text style={styles.detailRow}>
+            💧 Paraan: <Text style={styles.bold}>{f.farmType}</Text>
+          </Text>
+        )}
 
+        <View style={styles.thinDivider} />
+
+        {/* Tingnan Pa row */}
         <TouchableOpacity onPress={() => toggleExpand(fid)} style={styles.moreRow}>
-          <Ionicons name={open ? 'chevron-down' : 'chevron-forward'} size={18} color="#ff9800" />
-          <Text style={styles.moreText}>{open ? 'Itago' : 'Tingnan Pa'}</Text>
+          <Ionicons name={open ? 'chevron-down' : 'chevron-forward'} size={18} color={GREEN} />
+          <Text style={styles.moreText}>Tingnan Pa</Text>
         </TouchableOpacity>
 
+        {/* Expanded area */}
         {open && (
-          <View style={styles.readingBox}>
-            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-              <Text style={styles.readingTitle}>🧪 Huling Reading</Text>
+          <View style={styles.expandedBox}>
+            <Text style={styles.expTitle}>🧪 Huling Reading</Text>
+            <Text style={styles.expRow}>
+              🗓 Petsa: {r?.createdAt ? new Date(r.createdAt).toLocaleDateString() : '—'}
+            </Text>
+            <Text style={styles.expRow}>💧 pH: {fmt(r?.ph)}</Text>
+            <Text style={styles.expRow}>🌿 N: {fmt(r?.npk?.N)}</Text>
+            <Text style={styles.expRow}>🌱 P: {fmt(r?.npk?.P)}</Text>
+            <Text style={styles.expRow}>🥬 K: {fmt(r?.npk?.K)}</Text>
+
+            <View style={styles.expActions}>
               {r ? (
-                <TouchableOpacity onPress={() => onDeleteLatestReading(f)} style={{ padding: 6 }}>
-                  <Ionicons name="trash" size={18} color="#c62828" />
+                <TouchableOpacity onPress={() => onDeleteLatestReading(f)} style={styles.deleteLatestBtn}>
+                  <Ionicons name="trash-outline" size={18} color="#d32f2f" />
+                  <Text style={styles.deleteLatestText}>Delete latest</Text>
                 </TouchableOpacity>
               ) : null}
             </View>
-
-            <Text style={styles.readingDate}>
-              🗓 Petsa: {r?.createdAt ? new Date(r.createdAt).toLocaleDateString() : '—'}
-            </Text>
-            <Text style={styles.readingLine}>💧 pH: {fmt(r?.ph)}</Text>
-            <Text style={styles.readingLine}>🌿 Nitrogen (N): {fmt(r?.npk?.N)}</Text>
-            <Text style={styles.readingLine}>🌱 Phosphorus (P): {fmt(r?.npk?.P)}</Text>
-            <Text style={styles.readingLine}>🥬 Potassium (K): {fmt(r?.npk?.K)}</Text>
-            {!r && <Text style={styles.readingNote}>📫 Walang abono na nakarehistro para sa log na ito.</Text>}
           </View>
         )}
       </View>
@@ -327,7 +406,7 @@ export default function LogsScreen() {
   const empty = useMemo(
     () => (
       <View style={{ padding: 24, alignItems: 'center' }}>
-        <Text style={{ color: '#666' }}>Wala pang farmers. Magdagdag mula sa Home.</Text>
+        <Text style={{ color: TEXT_MUTED }}>Wala pang farmers. Magdagdag mula sa Home.</Text>
       </View>
     ),
     []
@@ -336,12 +415,17 @@ export default function LogsScreen() {
   return (
     <View style={styles.container}>
       <FlatList
-        data={farmers}
+        data={sortedFarmers}
         keyExtractor={keyExtractor}
         renderItem={renderItem}
-        ItemSeparatorComponent={() => <View style={{ height: 14 }} />}
+        ListHeaderComponent={ListHeader}
+        ItemSeparatorComponent={() => <View style={{ height: 12 }} />}
         ListEmptyComponent={empty}
-        contentContainerStyle={{ padding: 16, paddingBottom: 24 }}
+        contentContainerStyle={{
+          padding: 16,
+          paddingBottom: 110,
+          paddingTop: 0 + (Platform.OS === 'android' ? (StatusBar.currentHeight || 0) : 0),
+        }}
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={loadFarmersAndLatest} />
         }
@@ -357,47 +441,111 @@ function fmt(v: any) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#ffffff' },
+  container: { flex: 1, backgroundColor: '#f5f7f5' },
+
+  // Header bar
+  headerBar: {
+    backgroundColor: GREEN,
+    height: 56,
+    borderRadius: 8,
+    marginTop: 8,
+    marginBottom: 10,
+    paddingHorizontal: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  headerIcon: {
+    width: 52,
+    height: 56,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+    gap: 4,
+  },
+  headerTitle: {
+    flex: 1,
+    textAlign: 'left',
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  headerSortText: { color: '#fff', fontWeight: '700', marginLeft: 4, fontSize: 12 },
+
+  listHeaderWrap: { paddingHorizontal: 4 },
+  onlineRow: {
+    alignSelf: 'flex-end',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginRight: 6,
+    marginBottom: 8,
+  },
+  onlineDot: { width: 8, height: 8, borderRadius: 4 },
+  onlineText: { fontSize: 12, color: TEXT_MUTED, fontWeight: '600' },
+
+  // Card
   card: {
     backgroundColor: '#fff',
     borderRadius: 16,
     padding: 14,
-    elevation: 2,
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
     shadowColor: '#000',
     shadowOpacity: 0.06,
     shadowOffset: { width: 0, height: 2 },
     shadowRadius: 6,
-    borderWidth: 1,
-    borderColor: '#f0f0f0',
+    elevation: 2,
   },
-  cardTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  farmerName: { fontSize: 18, fontWeight: '800', color: '#2e7d32' },
-  actions: { flexDirection: 'row', gap: 14, alignItems: 'center' },
+  cardTop: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+  },
+  rightIcons: { flexDirection: 'row', gap: 10 },
+  iconTap: { padding: 6 },
 
-  detail: { fontSize: 14, color: '#333', marginTop: 4 },
-  detailBold: { fontWeight: '600' },
+  farmerName: { fontSize: 18, fontWeight: '800', color: GREEN },
+
+  detailRow: { marginTop: 6, color: TEXT_PRIMARY, fontSize: 14 },
+  bold: { fontWeight: '600' },
+
+  thinDivider: {
+    height: 1,
+    backgroundColor: '#eaeaea',
+    marginTop: 10,
+    marginBottom: 6,
+  },
 
   moreRow: {
-    marginTop: 10,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: '#e6e6e6',
-    paddingTop: 8,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
   },
-  moreText: { color: '#2e7d32', fontWeight: '700' },
+  moreText: { color: GREEN, fontWeight: '700' },
 
-  readingBox: {
+  expandedBox: {
     marginTop: 10,
-    backgroundColor: '#eaf5e8',
-    borderColor: '#b9dfb6',
+    backgroundColor: '#f7fff7',
     borderWidth: 1,
-    borderRadius: 14,
-    padding: 12,
+    borderColor: '#dfeee0',
+    borderRadius: 12,
+    padding: 10,
   },
-  readingTitle: { fontSize: 16, fontWeight: '800', color: '#2e7d32', marginBottom: 6 },
-  readingDate: { color: '#1b5e20', marginBottom: 6 },
-  readingLine: { color: '#1b5e20', marginTop: 2 },
-  readingNote: { color: '#4e6b4e', marginTop: 8, fontStyle: 'italic' },
+  expTitle: { fontWeight: '800', color: GREEN, marginBottom: 6 },
+  expRow: { color: '#1b5e20', marginTop: 2 },
+
+  expActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginTop: 10,
+  },
+  deleteLatestBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 8,
+  },
+  deleteLatestText: { color: '#d32f2f', fontWeight: '600' },
 });

@@ -32,8 +32,6 @@ import {
 
 /* ------------------ constants ------------------ */
 const SACK_WEIGHT_KG = 50;
-
-// These are still used for client-side example plans / narrative
 const TARGET_N_KG_HA = 120;
 const TARGET_P_KG_HA = 40;
 const TARGET_K_KG_HA = 80;
@@ -79,14 +77,14 @@ export default function RecommendationScreen() {
   /* ------- resolve live values from ReadingSession ------- */
   const farmerId = session?.farmerId ?? ''; // optional
   const farmerName = session?.farmerName ?? '';
-  const nValue = session?.n ?? 0; // ppm
-  const pValue = session?.p ?? 0; // ppm
-  const kValue = session?.k ?? 0; // ppm
+  const nValue = session?.n ?? 0;
+  const pValue = session?.p ?? 0;
+  const kValue = session?.k ?? 0;
   const phValue = session?.ph ?? 6.5;
   const phStatus =
     phValue < 5.5 ? 'Acidic' : phValue > 7.5 ? 'Alkaline' : 'Neutral';
 
-  /* ------- narrative (local) ------- */
+  /* ------- narrative ------- */
   const recommendationText =
     `Base sa datos, ang lupa ay nangangailangan ng` +
     `${nValue < TARGET_N_KG_HA ? ' Nitrogen' : ''}` +
@@ -149,7 +147,7 @@ export default function RecommendationScreen() {
     });
   }, [fertilizerAmounts, adminPrices]);
 
-  /* ------- cloud + server (IRRI / LGU) plans ------- */
+  /* ------- cloud + server plans ------- */
   const [postStatus, setPostStatus] = React.useState<
     'pending' | 'saving' | 'saved' | 'failed'
   >('pending');
@@ -268,28 +266,31 @@ export default function RecommendationScreen() {
           );
         }
 
-        // ✅ Fetch IRRI-based LGU plans from server
-        try {
-          const rec = await getRecommendation(token, {
-            n: nValue,         // ppm from sensor
-            p: pValue,         // ppm from sensor
-            k: kValue,         // ppm from sensor
-            ph: phValue,
-            riceType: 'HYBRID', // or 'INBRED'
-            season: 'WET',      // 'WET' or 'DRY'
-            soilType: 'LIGHT',  // 'LIGHT' or 'HEAVY'
-            areaHa: 1,
-          });
+        // optional: fetch server (LGU) plans
+       // optional: fetch server (LGU) plans
+try {
+  const rec = await getRecommendation(token, {
+    n: nValue,
+    p: pValue,
+    k: kValue,
+    ph: phValue,
+    areaHa: 1,
+    // you can add these later if backend supports them:
+    // riceType: 'HYBRID',
+    // season: 'WET',
+    // soilType: 'LIGHT',
+  });
 
-          if (Array.isArray(rec?.plans)) {
-            setServerPlans(rec.plans as ServerPlan[]);
-          }
-          if (rec?.narrative) {
-            setServerNarrative(rec.narrative as { en?: string; tl?: string });
-          }
-        } catch (e) {
-          console.warn('[recommendation] fetch warn:', e);
-        }
+  if (Array.isArray(rec?.plans)) {
+    setServerPlans(rec.plans as ServerPlan[]);
+  }
+  if (rec?.narrative) {
+    setServerNarrative(rec.narrative as { en?: string; tl?: string });
+  }
+} catch (e) {
+  console.warn('[recommendation] fetch warn:', e);
+}
+
       }
 
       await persistLocalHistory();
@@ -509,7 +510,7 @@ export default function RecommendationScreen() {
         )}
       </View>
 
-      {/* LOCAL NARRATIVE */}
+      {/* NARRATIVE */}
       <View style={styles.recommendationBox}>
         <Text style={styles.recommendationTitle}>
           Rekomendasyon:{' '}
@@ -600,7 +601,7 @@ export default function RecommendationScreen() {
         </View>
       ))}
 
-      {/* SERVER (LGU / IRRI) PLANS */}
+      {/* SERVER (LGU) PLANS */}
       {(serverPlans?.length ?? 0) > 0 && (
         <>
           <Text style={[styles.sectionTitle, { marginTop: 10 }]}>

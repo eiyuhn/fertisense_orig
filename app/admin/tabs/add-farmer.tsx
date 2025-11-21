@@ -1,11 +1,12 @@
-// app/admin/tabs/add-farmer.tsx
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import {
   Alert,
   KeyboardAvoidingView,
+  Modal,
   Platform,
-  ScrollView,
+  Pressable,
+  ScrollView, // We will change this to View
   StyleSheet,
   Text,
   TextInput,
@@ -17,13 +18,17 @@ import { Ionicons } from '@expo/vector-icons';
 import { Picker } from '@react-native-picker/picker';
 import { createFarmer, updateFarmer, listFarmers } from '../../../src/services';
 
+// (Optional) theme import kept, but the design uses fixed values for a pixel-perfect match
+// import { COLORS, SIZES, FONTS } from '../../../src/theme';
+
+// --- TYPES ---
 type CropType = '' | 'hybrid' | 'inbred' | 'pareho';
 type CropStyle = '' | 'irrigated' | 'rainfed' | 'pareho';
 
 type FormState = {
   name: string;
   farmLocation: string;
-  landAreaHa: string; // keep as string for input
+  landAreaHa: string;
   cropType: CropType;
   cropStyle: CropStyle;
 };
@@ -36,13 +41,25 @@ const EMPTY_FORM: FormState = {
   cropStyle: '',
 };
 
+type ErrorState = {
+  name?: string;
+  farmLocation?: string;
+  landAreaHa?: string;
+  cropType?: string;
+  cropStyle?: string;
+};
+
 export default function AddOrEditFarmer() {
   const router = useRouter();
-  const params = useLocalSearchParams<{ edit?: string; ts?: string }>();
 
+  // --- ROUTE / MODE ---
+  const params = useLocalSearchParams<{ edit?: string; ts?: string }>();
   const rawEdit = params?.edit;
   const editId =
-    typeof rawEdit === 'string' && rawEdit.trim() && rawEdit !== 'undefined' && rawEdit !== 'null'
+    typeof rawEdit === 'string' &&
+    rawEdit.trim() &&
+    rawEdit !== 'undefined' &&
+    rawEdit !== 'null'
       ? rawEdit.trim()
       : null;
   const isEdit = !!editId;
@@ -52,10 +69,12 @@ export default function AddOrEditFarmer() {
     [isEdit, editId, params?.ts]
   );
 
+  // --- STATE ---
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
-  const [errors, setErrors] = useState<{ name?: string; landAreaHa?: string }>({});
+  const [errors, setErrors] = useState<ErrorState>({});
   const prevEditIdRef = useRef<string | null>(null);
+  const [showSuccessModal, setShowSuccessModal] = useState(false);
 
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) =>
     setForm((s) => ({ ...s, [k]: v }));
@@ -87,7 +106,9 @@ export default function AddOrEditFarmer() {
       if (!isEdit || !editId) return;
       try {
         const all = await listFarmers();
-        const one = all.find((x: any) => (x._id || x.id) === editId);
+        const one = all.find(
+          (x: any) => (x._id || x.id || '').toString() === editId
+        );
         if (!one) throw new Error('Farmer not found');
         if (!cancelled) {
           setForm({
@@ -102,53 +123,55 @@ export default function AddOrEditFarmer() {
       } catch (e: any) {
         if (!cancelled) {
           Alert.alert('Error', e?.message || 'Failed to load farmer');
-          setForm(EMPTY_FORM);
         }
       }
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [isEdit, editId]);
 
   const validate = () => {
-    const next: typeof errors = {};
+    const next: ErrorState = {};
     if (!form.name.trim()) next.name = 'Pangalan ay kailangan.';
-    if (form.landAreaHa !== '' && isNaN(Number(form.landAreaHa))) {
+    if (!form.farmLocation.trim())
+      next.farmLocation = 'Lokasyon ay kailangan.';
+    if (!form.landAreaHa.trim()) {
+      next.landAreaHa = 'Laki ng sakahan ay kailangan.';
+    } else if (isNaN(Number(form.landAreaHa))) {
       next.landAreaHa = 'Dapat numero (hal. 2 o 2.5).';
-    } else if (form.landAreaHa !== '' && Number(form.landAreaHa) < 0) {
-      next.landAreaHa = 'Hindi pwedeng negatibo.';
+    } else if (Number(form.landAreaHa) <= 0) {
+      next.landAreaHa = 'Hindi pwedeng zero o negatibo.';
     }
+    if (!form.cropType) next.cropType = 'Uri ng palay ay kailangan.';
+    if (!form.cropStyle) next.cropStyle = 'Estilo ng pagtatanim ay kailangan.';
+
     setErrors(next);
     return Object.keys(next).length === 0;
   };
 
   const onSave = async () => {
-    if (!validate()) return;
+    if (!validate()) {
+      Alert.alert('Kulang ang Impormasyon', 'Pakikumpleto ang lahat ng field.');
+      return;
+    }
 
     const payloadBase = {
       name: form.name.trim(),
       farmLocation: form.farmLocation.trim(),
-      landAreaHa: form.landAreaHa === '' || form.landAreaHa == null ? 0 : Number(form.landAreaHa),
+      landAreaHa: Number(form.landAreaHa),
       cropType: form.cropType,
       cropStyle: form.cropStyle,
     };
-
-    if (!payloadBase.name) {
-      // fallback, though validate() covers this
-      Alert.alert('Kulang', 'Paki-lagay ang pangalan ng magsasaka.');
-      return;
-    }
 
     try {
       setSaving(true);
       if (isEdit && editId) {
         await updateFarmer(editId, payloadBase);
-        Alert.alert('Saved', 'Na-update ang datos ng magsasaka.');
-        router.back();
+        setShowSuccessModal(true);
       } else {
         await createFarmer(payloadBase);
-        Alert.alert('Saved', 'Nagdagdag ng bagong magsasaka.');
-        setForm(EMPTY_FORM);
-        setErrors({});
+        setShowSuccessModal(true);
       }
     } catch (e: any) {
       const msg =
@@ -162,288 +185,304 @@ export default function AddOrEditFarmer() {
     }
   };
 
-  const title = useMemo(() => (isEdit ? 'Edit Farmer' : 'Add Farmer'), [isEdit]);
+  const closeModal = () => {
+    setShowSuccessModal(false);
+    if (isEdit) {
+      router.back();
+    } else {
+      setForm(EMPTY_FORM);
+      setErrors({});
+    }
+  };
 
+  const isFormValid = useMemo(() => {
+    return !!(
+      form.name &&
+      form.farmLocation &&
+      form.landAreaHa &&
+      form.cropType &&
+      form.cropStyle &&
+      !saving
+    );
+  }, [form, saving]);
+
+  // --- UI (Friend’s design cloned) ---
   return (
     <KeyboardAvoidingView
       key={screenKey}
-      style={{ flex: 1, backgroundColor: '#FFFFFF' }}
+      style={styles.container}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
-      {/* Top bar */}
-      <View style={styles.topBar}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.backBtn} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-          <Ionicons name="arrow-back" size={20} color="#1b5e20" />
+      {/* Header */}
+      <View style={styles.header}>
+        <TouchableOpacity onPress={() => router.back()}>
+          <Ionicons name="arrow-back" size={22} color="#fff" />
         </TouchableOpacity>
-        <Text style={styles.topTitle} numberOfLines={1}>{title}</Text>
-        <View style={{ width: 32 }} />
+        <Text style={styles.headerTitle}>
+          {isEdit ? 'Edit Farmer Data' : 'Add a Farmer Data'}
+        </Text>
       </View>
 
-      <ScrollView contentContainerStyle={styles.body}>
+      {/* Form */}
+      {/* ✅ FIX: Changed ScrollView to View */}
+      <View style={styles.form}>
         {/* Name */}
-        <FieldLabel text="Pangalan ng Magsasaka" required />
-        <Input
-          placeholder="Hal. Juan Dela Cruz"
+        <Text style={styles.label}>👤 Pangalan ng Magsasaka</Text>
+        <TextInput
+          style={[styles.input, errors.name ? styles.inputError : null]}
           value={form.name}
-          onChangeText={(v: string) => set('name', v)}
+          onChangeText={(v) => set('name', v)}
+          placeholder="Hal. Juan Dela Cruz"
+          placeholderTextColor="#aaa"
           autoCapitalize="words"
-          error={errors.name}
-          iconLeft="person"
         />
+        {errors.name ? <Text style={styles.errorText}>{errors.name}</Text> : null}
 
         {/* Location */}
-        <FieldLabel text="Lokasyon ng Sakahan" />
-        <Input
-          placeholder="Hal. Valencia, Bukidnon"
+        <Text style={styles.label}>📍 Lokasyon ng Sakahan</Text>
+        <TextInput
+          style={[styles.input, errors.farmLocation ? styles.inputError : null]}
           value={form.farmLocation}
-          onChangeText={(v: string) => set('farmLocation', v)}
-          iconLeft="pin"
+          onChangeText={(v) => set('farmLocation', v)}
+          placeholder="Hal. Valencia, Bukidnon"
+          placeholderTextColor="#aaa"
         />
+        {errors.farmLocation ? (
+          <Text style={styles.errorText}>{errors.farmLocation}</Text>
+        ) : null}
 
         {/* Land Area */}
-        <FieldLabel text="Laki ng Sakahan" hint="(hectares)" />
-        <Input
-          placeholder="Hal. 2.5"
+        <Text style={styles.label}>📏 Laki ng Sakahan (hectares)</Text>
+        <TextInput
+          style={[styles.input, errors.landAreaHa ? styles.inputError : null]}
           value={form.landAreaHa}
-          onChangeText={(v: string) => set('landAreaHa', v.replace(',', '.'))}
-          keyboardType="decimal-pad"
-          iconLeft="expand"
-          unit="ha"
-          error={errors.landAreaHa}
+          onChangeText={(v) => set('landAreaHa', v.replace(/[^0-9.]/g, ''))}
+          placeholder="Hal. 2.5"
+          keyboardType="numeric"
+          placeholderTextColor="#aaa"
         />
+        {errors.landAreaHa ? (
+          <Text style={styles.errorText}>{errors.landAreaHa}</Text>
+        ) : null}
 
         {/* Crop Type */}
-        <FieldLabel text="Uri ng Palay" />
-        <PickerWrap>
+        <Text style={styles.label}>🌾 Uri ng Palay</Text>
+        <View
+          style={[
+            styles.pickerWrapper, // ✅ FIX: Style modified below
+            errors.cropType ? styles.inputError : null,
+          ]}
+        >
           <Picker
             selectedValue={form.cropType}
             onValueChange={(value: CropType) => set('cropType', value)}
-            style={styles.picker}
+            style={styles.picker} // ✅ FIX: Style modified below
             dropdownIconColor="#2e7d32"
           >
-            <Picker.Item label="Pumili ng uri..." value="" />
+            <Picker.Item label="Pumili..." value="" />
             <Picker.Item label="Hybrid" value="hybrid" />
             <Picker.Item label="Inbred" value="inbred" />
             <Picker.Item label="Pareho" value="pareho" />
           </Picker>
-        </PickerWrap>
+        </View>
+        {errors.cropType ? (
+          <Text style={styles.errorText}>{errors.cropType}</Text>
+        ) : null}
 
         {/* Crop Style */}
-        <FieldLabel text="Estilo ng Pagtatanim" />
-        <PickerWrap>
+        <Text style={styles.label}>💧 Estilo ng Pagtatanim</Text>
+        <View
+          style={[
+            styles.pickerWrapper, // ✅ FIX: Style modified below
+            errors.cropStyle ? styles.inputError : null,
+          ]}
+        >
           <Picker
             selectedValue={form.cropStyle}
             onValueChange={(value: CropStyle) => set('cropStyle', value)}
-            style={styles.picker}
+            style={styles.picker} // ✅ FIX: Style modified below
             dropdownIconColor="#2e7d32"
           >
-            <Picker.Item label="Pumili ng estilo..." value="" />
+            <Picker.Item label="Pumili..." value="" />
             <Picker.Item label="Irrigated" value="irrigated" />
             <Picker.Item label="Rainfed" value="rainfed" />
             <Picker.Item label="Pareho" value="pareho" />
           </Picker>
-        </PickerWrap>
+        </View>
+        {errors.cropStyle ? (
+          <Text style={styles.errorText}>{errors.cropStyle}</Text>
+        ) : null}
 
-        <View style={{ height: 80 }} />
-      </ScrollView>
-
-      {/* Sticky action bar */}
-      <View style={styles.actionBar}>
-        <TouchableOpacity onPress={onSave} disabled={saving} style={[styles.saveBtn, saving && { opacity: 0.7 }]} activeOpacity={0.9}>
-          <Ionicons name="save" size={18} color="#fff" />
-          <Text style={styles.saveText}>{isEdit ? 'Save Changes' : 'Save Farmer'}</Text>
+        {/* Save Button */}
+        <TouchableOpacity
+          style={[
+            styles.saveButton, // ✅ FIX: Style modified below
+            (!isFormValid || saving) && { backgroundColor: '#aaa' },
+          ]}
+          onPress={onSave}
+          disabled={!isFormValid || saving}
+          activeOpacity={0.8}
+        >
+          <Text style={styles.saveText}>
+            💾 {saving ? 'Saving...' : isEdit ? 'Save Changes' : 'Save Farmer'}
+          </Text>
         </TouchableOpacity>
       </View>
+
+      {/* Success Modal */}
+      <Modal
+        animationType="fade"
+        transparent
+        visible={showSuccessModal}
+        onRequestClose={closeModal}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalBox}>
+            <Text style={styles.modalTitle}>
+              {isEdit ? 'Farmer Updated!' : 'Farmer Added!'}
+            </Text>
+            <Text style={styles.modalMessage}>
+              👤 {form.name}
+              {'\n'}📍 {form.farmLocation}
+            </Text>
+            <Pressable style={styles.modalButton} onPress={closeModal}>
+              <Text style={styles.modalButtonText}>Continue</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </KeyboardAvoidingView>
   );
 }
 
-/* ---------- Tiny UI helpers ---------- */
-function FieldLabel({ text, required, hint }: { text: string; required?: boolean; hint?: string }) {
-  return (
-    <View style={styles.labelRow}>
-      <Text style={styles.labelText}>{text}</Text>
-      {required && <Text style={styles.requiredDot}> • Required</Text>}
-      {hint && <Text style={styles.hint}> {hint}</Text>}
-    </View>
-  );
-}
-
-function Input({
-  iconLeft,
-  unit,
-  error,
-  style,
-  ...props
-}: any) {
-  return (
-    <View style={[styles.inputWrap, error ? styles.inputError : null]}>
-      {iconLeft ? (
-        <View style={styles.iconLeft}>
-          <Ionicons name={iconLeft as any} size={16} color="#2e7d32" />
-        </View>
-      ) : null}
-      <TextInput {...props} style={[styles.input, style]} placeholderTextColor="#9aa49a" />
-      {unit ? (
-        <View style={styles.unitChip}>
-          <Text style={styles.unitText}>{unit}</Text>
-        </View>
-      ) : null}
-      {error ? <Text style={styles.errorText}>{error}</Text> : null}
-    </View>
-  );
-}
-
-function PickerWrap({ children }: { children: React.ReactNode }) {
-  return (
-    <View style={styles.pickerWrap}>
-      {children}
-    </View>
-  );
-}
-
-/* ---------- Styles ---------- */
+// --- STYLES: cloned from friend’s design (fonts/colors/spacing) ---
 const styles = StyleSheet.create({
-  /* Layout */
-  topBar: {
-    height: 52,
-    borderBottomWidth: 1,
-    borderBottomColor: '#E9F2EA',
-    paddingHorizontal: 12,
+  container: { flex: 1, backgroundColor: '#f5fff5' },
+  header: {
+    backgroundColor: '#2e7d32',
+    paddingTop: 70,
+    paddingBottom: 24,
+    paddingHorizontal: 20,
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#FFFFFF',
+    gap: 55,
+    bottom: 18,
+    elevation: 6,
+    shadowColor: '#000',
+    shadowOpacity: 0.1,
+    shadowOffset: { width: 0, height: 2 },
+    shadowRadius: 4,
   },
-  backBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#ECF7EE',
+  headerTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#fff',
+    fontFamily: 'Poppins_700Bold',
   },
-  topTitle: {
-    flex: 1,
-    textAlign: 'center',
-    color: '#1b5e20',
-    fontWeight: '800',
-    fontSize: 16,
+  form: {
+    paddingHorizontal: 22,
+    paddingTop: 16, // ✅ FIX: Reduced from 22
+    paddingBottom: 110, // ✅ FIX: Space for the nav bar
+    // Note: If this still overflows on small phones, add flex: 1
+    // and justifyContent: 'center' to space items out
   },
-  body: {
-    paddingHorizontal: 14,
-    paddingTop: 10,
-    paddingBottom: 12,
-    backgroundColor: '#FFFFFF',
-  },
-
-  /* Labels */
-  labelRow: {
-    flexDirection: 'row',
-    alignItems: 'baseline',
-    marginTop: 10,
-    marginBottom: 6,
-  },
-  labelText: {
-    color: '#1b5e20',
-    fontWeight: '700',
-    fontSize: 13.5,
-  },
-  requiredDot: {
-    color: '#b23b3b',
-    fontWeight: '700',
-    fontSize: 12,
-    marginLeft: 4,
-  },
-  hint: {
-    color: '#607d60',
-    fontSize: 12,
-    marginLeft: 6,
-  },
-
-  /* Inputs */
-  inputWrap: {
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#E0E9E1',
-    backgroundColor: '#FAFFFB',
-    marginBottom: 8,
-    minHeight: 46,
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingRight: 8,
-    position: 'relative',
-  },
-  inputError: {
-    borderColor: '#e7b0b0',
-    backgroundColor: '#FFFBFB',
+  label: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#2e7d32',
+    marginBottom: 8, // ✅ FIX: Reduced from 10
+    fontFamily: 'Poppins_600SemiBold',
   },
   input: {
-    flex: 1,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    fontSize: 14,
+    borderWidth: 1.3,
+    borderColor: '#c1e1c1',
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    marginBottom: 16, // ✅ FIX: Reduced from 20
+    backgroundColor: '#fff',
+    fontSize: 15,
+    fontFamily: 'Poppins_400Regular',
     color: '#333',
   },
-  iconLeft: {
-    width: 34,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  unitChip: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    backgroundColor: '#ECF7EE',
-    borderRadius: 999,
-    marginLeft: 6,
-  },
-  unitText: {
-    color: '#2e7d32',
-    fontWeight: '700',
-    fontSize: 12,
+  inputError: {
+    borderColor: '#d32f2f',
   },
   errorText: {
-    position: 'absolute',
-    bottom: -16,
-    left: 10,
-    color: '#b22a2a',
-    fontSize: 11.5,
+    color: '#d32f2f',
+    fontSize: 12,
+    marginTop: -12, // ✅ FIX: Adjusted from -14
+    marginBottom: 12, // ✅ FIX: Adjusted from 14
+    marginLeft: 4,
+    fontFamily: 'Poppins_400Regular',
   },
-
-  /* Picker */
-  pickerWrap: {
+  pickerWrapper: {
     borderWidth: 1,
-    borderColor: '#E0E9E1',
-    borderRadius: 12,
-    backgroundColor: '#FAFFFB',
-    marginBottom: 10,
-    overflow: 'hidden',
+    borderColor: '#c1e1c1',
+    borderRadius: 10,
+    marginBottom: 16, // ✅ FIX: Reduced from 20
+    backgroundColor: '#fff',
+    justifyContent: 'center',
+    height: 50, // ✅ FIX: Added fixed height to match input
   },
   picker: {
-    height: 46,
+    // height: 47, // ❌ REMOVED: This was causing the text to be cut
+    fontFamily: 'Poppins_400Regular',
     color: '#333',
   },
-
-  /* Sticky action bar */
-  actionBar: {
-    borderTopWidth: 1,
-    borderTopColor: '#E9F2EA',
-    backgroundColor: '#FFFFFF',
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-  },
-  saveBtn: {
+  saveButton: {
     backgroundColor: '#2e7d32',
-    flexDirection: 'row',
+    paddingVertical: 14,
+    borderRadius: 50,
     alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    paddingVertical: 12,
-    borderRadius: 999,
+    elevation: 4,
+    // top: 30, // ❌ REMOVED: This caused the large gap
+    marginTop: 24, // ✅ FIX: Added a normal margin
   },
   saveText: {
     color: '#fff',
-    fontWeight: '800',
-    fontSize: 14.5,
-    letterSpacing: 0.2,
+    fontSize: 16,
+    fontWeight: 'bold',
+    fontFamily: 'Poppins_600SemiBold',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.25)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalBox: {
+    backgroundColor: '#fff',
+    padding: 24,
+    borderRadius: 16,
+    width: '80%',
+    alignItems: 'center',
+    elevation: 6,
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    marginBottom: 10,
+    color: '#2e7d32',
+    fontFamily: 'Poppins_700Bold',
+  },
+  modalMessage: {
+    fontSize: 15,
+    textAlign: 'center',
+    marginBottom: 20,
+    color: '#444',
+    fontFamily: 'Poppins_400Regular',
+  },
+  modalButton: {
+    backgroundColor: '#2e7d32',
+    paddingVertical: 10,
+    paddingHorizontal: 60,
+    borderRadius: 8,
+  },
+  modalButtonText: {
+    color: '#fff',
+    fontWeight: '600',
+    fontSize: 15,
+    fontFamily: 'Poppins_600SemiBold',
   },
 });

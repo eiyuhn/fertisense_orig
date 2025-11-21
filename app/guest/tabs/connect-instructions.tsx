@@ -1,3 +1,5 @@
+// app/guest/screens/connect-instructions.tsx
+
 import React, { useState } from 'react';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter, useLocalSearchParams } from 'expo-router';
@@ -11,10 +13,11 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { autoConnectToESP32, readNpkFromESP32 } from '../../../src/esp32';
+// Ensure this path is correct based on your project structure
+import { autoConnectToESP32, readNpkFromESP32 } from '../../../src/esp32'; 
 
 // 🔒 Your images are in ROOT: /assets/images (not app/assets)
-const logo     = require('../../../assets/images/fertisense-logo.png');
+const logo      = require('../../../assets/images/fertisense-logo.png');
 const icPower  = require('../../../assets/images/power.png');
 const icWifi   = require('../../../assets/images/connect-wifi.png');
 const icSensor = require('../../../assets/images/sensor.png');
@@ -40,7 +43,7 @@ export default function ConnectInstructions() {
 
       // 3) Navigate to your next screen
       router.push({
-        pathname: '/select-options' as const,
+        pathname: '/guest/screens/select-options' as const,
         params: { farmerId: String(farmerId ?? '') },
       });
     } catch (err: any) {
@@ -56,7 +59,8 @@ export default function ConnectInstructions() {
 
   const handleBack = () => {
     if (router.canGoBack()) router.back();
-    else router.push('/admin/tabs/admin-home');
+    // ✅ FIX: Guest users should navigate to guest home, not admin home.
+    else router.push('/guest/tabs/guest-home'); 
   };
 
   return (

@@ -1,69 +1,110 @@
-// app/admin/tabs/_layout.tsx
-import React from 'react';
-import { Tabs } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { Tabs } from 'expo-router';
+// Removed Image, useMemo, and BASE_URL imports as they are no longer needed
+// to display the profile icon.
+import { Platform, StyleSheet, View } from 'react-native';
+import { useAuth } from '../../../context/AuthContext';
 
-const green = '#0d5213';
-const lightGreen = '#c8e6c9';
+export default function AdminTabLayout() {
+  // 'user' is still fetched but no longer used for the tab bar icon logic.
+  const { user } = useAuth();
 
-export default function TabsLayout() {
-  return (
-    <Tabs
-      screenOptions={{
-        headerShown: false,
-        tabBarStyle: {
-          backgroundColor: green,
-          borderTopColor: green,
-          height: 64,
-          paddingTop: 6,
-          paddingBottom: 10,
-        },
-        tabBarActiveTintColor: '#fff',
-        tabBarInactiveTintColor: lightGreen,
-        tabBarLabelStyle: { fontSize: 11, fontFamily: 'Poppins_600SemiBold' },
-      }}
-    >
-      <Tabs.Screen
-        name="admin-home"
-        options={{
-          title: 'Home',
-          tabBarIcon: ({ color, size, focused }) => (
-            <Ionicons name={focused ? 'home' : 'home-outline'} size={size} color={color} />
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="logs"
-        options={{
-          title: 'Farmer Logs',
-          tabBarIcon: ({ color, size, focused }) => (
-            <Ionicons name={focused ? 'reader' : 'reader-outline'} size={size} color={color} />
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="connect-instructions"
-        options={{
-          title: 'Connect',
-          tabBarIcon: ({ color, size, focused }) => (
-            <Ionicons name={focused ? 'wifi' : 'wifi-outline'} size={size} color={color} />
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="admin-profile"
-        options={{
-          title: 'Profile',
-          tabBarIcon: ({ color, size, focused }) => (
-            <Ionicons name={focused ? 'person' : 'person-outline'} size={size} color={color} />
-          ),
-        }}
-      />
-      {/* Hidden routes living under /tabs */}
-      <Tabs.Screen name="farmers" options={{ href: null }} />
-      <Tabs.Screen name="prices" options={{ href: null }} />
-      <Tabs.Screen name="add-farmer" options={{ href: null }} />
-      <Tabs.Screen name="edit-price" options={{ href: null }} />
-    </Tabs>
-  );
+  return (
+    <Tabs
+      screenOptions={({ route }) => ({
+        headerShown: false,
+        tabBarShowLabel: false,
+        tabBarStyle: styles.tabBar,
+        tabBarItemStyle: styles.tabBarItem,
+        tabBarIcon: ({ focused }) => {
+          // Non-profile tabs use Ionicons mapping:
+          if (route.name !== 'admin-profile') {
+            let iconName: keyof typeof Ionicons.glyphMap = 'home';
+            switch (route.name) {
+              case 'admin-home':
+                iconName = 'home';
+                break;
+              case 'logs':
+                iconName = focused ? 'grid' : 'grid-outline';
+                break;
+              case 'connect-instructions':
+                iconName = focused ? 'time' : 'time-outline';
+                break;
+              default:
+                iconName = focused ? 'home' : 'home-outline';
+            }
+            return (
+              <View style={styles.iconWrapper}>
+                <View style={[styles.iconCircle, focused && styles.focusedCircle]}>
+                  <Ionicons name={iconName} size={24} color={focused ? '#fff' : '#888'} />
+                </View>
+              </View>
+            );
+          }
+
+          // ✅ Profile tab is now simplified to always use the Ionicon
+          return (
+            <View style={styles.iconWrapper}>
+              <View style={[styles.iconCircle, focused && styles.focusedCircle]}>
+                <Ionicons
+                  name={focused ? 'person' : 'person-outline'}
+                  size={24}
+                  color={focused ? '#fff' : '#888'}
+                />
+              </View>
+            </View>
+          );
+        },
+      })}
+    >
+      {/* Visible tabs */}
+      <Tabs.Screen name="admin-home" />
+      <Tabs.Screen name="logs" />
+      <Tabs.Screen name="connect-instructions" />
+      <Tabs.Screen name="admin-profile" />
+      {/* Hidden routes under /tabs */}
+      <Tabs.Screen name="farmers" options={{ href: null }} />
+      <Tabs.Screen name="prices" options={{ href: null }} />
+      <Tabs.Screen name="add-farmer" options={{ href: null }} />
+      <Tabs.Screen name="edit-price" options={{ href: null }} />
+    </Tabs>
+  );
 }
+
+const styles = StyleSheet.create({
+  tabBar: {
+    height: 90,
+    position: 'absolute',
+    bottom: Platform.OS === 'ios' ? 16 : 10,
+    left: 16,
+    right: 16,
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    paddingBottom: Platform.OS === 'ios' ? 20 : 10,
+    paddingTop: 10,
+    shadowColor: '#000',
+    shadowOpacity: 0.08,
+    shadowOffset: { width: 0, height: 0 },
+    shadowRadius: 0,
+    elevation: 19,
+  },
+  tabBarItem: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  iconWrapper: {
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  iconCircle: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  focusedCircle: {
+    backgroundColor: '#2e7d32',
+  },
+});

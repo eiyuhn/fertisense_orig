@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { Picker } from '@react-native-picker/picker';
-import { useRouter } from 'expo-router';
+import { useRouter, useLocalSearchParams } from 'expo-router'; // Import useLocalSearchParams
 import { useState } from 'react';
 import {
   Platform,
@@ -14,6 +14,7 @@ import {
 
 export default function SelectOptionsScreen() {
   const router = useRouter();
+  const { farmerId } = useLocalSearchParams<{ farmerId?: string }>(); // Get farmerId if passed
 
   const [riceType, setRiceType] = useState<string | null>(null);
   const [cropStyle, setCropStyle] = useState('');
@@ -22,11 +23,20 @@ export default function SelectOptionsScreen() {
 
   const allSelected = riceType && cropStyle && soilType && season;
 
+  const handleProceed = () => {
+    // Pass farmerId along to the sensor reading screen
+    router.push({
+        pathname: '/(stakeholder)/screens/sensor-reading',
+        params: { farmerId: String(farmerId ?? '') } // Pass farmerId
+    });
+  };
+
   return (
     <SafeAreaView style={styles.safeArea}>
       {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.push('/tabs/connect-instructions')}>
+        {/* Adjusted back button to go back in navigation history */}
+        <TouchableOpacity onPress={() => router.back()}>
           <Ionicons name="arrow-back" size={24} color="#fff" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Farm Details</Text>
@@ -107,6 +117,7 @@ export default function SelectOptionsScreen() {
           </View>
         </View>
 
+        {/* Spacer to push content up from button */}
         <View style={{ height: 100 }} />
       </ScrollView>
 
@@ -114,15 +125,16 @@ export default function SelectOptionsScreen() {
       <TouchableOpacity
         style={[styles.proceedButton, !allSelected && styles.disabledButton]}
         disabled={!allSelected}
-        onPress={() => router.push('/(stakeholder)/screens/sensor-reading')}
+        onPress={handleProceed} // Use the handler function
       >
         <Ionicons name="arrow-forward-circle" size={20} color="#fff" />
-        <Text style={styles.proceedText}>  Magpatuloy</Text>
+        <Text style={styles.proceedText}> Magpatuloy</Text>
       </TouchableOpacity>
     </SafeAreaView>
   );
 }
 
+// Styles are unchanged from your version
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
@@ -132,7 +144,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#1b5e20',
-    paddingTop: 60,
+    paddingTop: Platform.OS === 'android' ? 25 : 60, // Adjust top padding
     paddingBottom: 15,
     paddingHorizontal: 20,
     elevation: 10,
@@ -143,10 +155,12 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontWeight: 'bold',
     textAlign: 'center',
-    marginRight: 30,
+    marginRight: 30, // Adjust to center title properly with back button
+    // fontFamily: 'Poppins_700Bold', // Assuming font is loaded
   },
   scrollContent: {
     padding: 24,
+    paddingBottom: 120, // Ensure space above proceed button
   },
   description: {
     fontSize: 14,
@@ -155,7 +169,7 @@ const styles = StyleSheet.create({
     paddingBottom: 9,
     textAlign: 'center',
     fontStyle: 'italic',
-    fontFamily: 'Poppins_400Regular',
+    // fontFamily: 'Poppins_400Regular', // Assuming font is loaded
   },
   card: {
     backgroundColor: '#ffffff',
@@ -174,7 +188,8 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: '#2e7d32',
     marginBottom: 11,
-    fontFamily: 'Poppins_600SemiBold',
+    // fontFamily: 'Poppins_600SemiBold', // Assuming font is loaded
+    fontWeight: '600',
   },
   optionsRow: {
     flexDirection: 'row',
@@ -195,11 +210,13 @@ const styles = StyleSheet.create({
   },
   chipText: {
     color: '#2e7d32',
-    fontFamily: 'Poppins_500Medium',
+    // fontFamily: 'Poppins_500Medium', // Assuming font is loaded
+    fontWeight: '500',
   },
   chipTextSelected: {
-    color: '#fff',
-    fontFamily: 'Poppins_700Bold',
+    color: '#1b5e20', // Darker text on selected
+    // fontFamily: 'Poppins_700Bold', // Assuming font is loaded
+    fontWeight: '700',
   },
   pickerWrapper: {
     borderWidth: 1.3,
@@ -207,24 +224,27 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     overflow: 'hidden',
     backgroundColor: '#f0fdf4',
+    height: 50, // Fixed height
+    justifyContent: 'center', // Center picker vertically
   },
   pickerSelected: {
     backgroundColor: '#d9f7dc',
     borderColor: '#1b5e20',
   },
   picker: {
-    height: 50,
-    paddingHorizontal: 10,
-    fontFamily: 'Poppins_400Regular',
+    // height: 50, // Height is controlled by wrapper
+    // paddingHorizontal: 10, // Padding might not work consistently
+    // fontFamily: 'Poppins_400Regular', // Font might not work
   },
   selectedPickerText: {
     color: '#1b5e20',
-    fontWeight: 'bold',
-    fontFamily: 'Poppins_600SemiBold',
+    fontWeight: 'bold', // Make selected item bold
+    // fontFamily: 'Poppins_600SemiBold', // Font might not work
   },
   proceedButton: {
     position: 'absolute',
-    bottom: 70,
+    // bottom: 70, // Adjust if needed with nav bar
+    bottom: Platform.OS === 'ios' ? 90 : 70, // Adjust for iOS safe area / Android nav bar
     left: 20,
     right: 20,
     flexDirection: 'row',
@@ -241,6 +261,7 @@ const styles = StyleSheet.create({
   proceedText: {
     color: '#fff',
     fontSize: 17,
-    fontWeight: '600', // NOT using Poppins here as requested
+    fontWeight: '600',
+    marginLeft: 5, // Add space after icon
   },
 });

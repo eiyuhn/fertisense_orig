@@ -1,6 +1,4 @@
-import { Ionicons } from '@expo/vector-icons';
-import { useLocalSearchParams, useRouter } from 'expo-router';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useCallback, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -10,10 +8,13 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { getNpkFresh, getNpkCached, connectToESP, ESP_SSID } from '../../../src/esp32';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
+
+import { autoConnectToESP32, readNpkFromESP32, ESP_SSID } from '../../../src/esp32';
 import { useData } from '../../../context/DataContext';
 import { useAuth } from '../../../context/AuthContext';
-import { addReading } from '../../../src/services';
+import { useReadingSession } from '../../../context/ReadingSessionContext';
 
 type NpkJson = {
   ok?: boolean;
@@ -22,7 +23,6 @@ type NpkJson = {
   p?: number;
   k?: number;
   ph?: number;
-  // optional extras the ESP sometimes returns
   ec?: number;
   n_kg_ha?: number;
   p_kg_ha?: number;
@@ -31,204 +31,303 @@ type NpkJson = {
 };
 
 const TOTAL_STEPS = 10;
+// 🔁 minimum time for each spot reading so spinner does a “full circle”
+const MIN_READING_DURATION_MS = 3000;
 
 export default function SensorReadingScreen() {
   const router = useRouter();
   const { farmerId } = useLocalSearchParams<{ farmerId?: string }>();
   const { setLatestSensorData } = useData();
-  const { token } = useAuth();
+  const { token } = useAuth(); // reserved if needed later
+  const { setFromParams } = useReadingSession();
 
   const [currentStep, setCurrentStep] = useState(0);
-  const [isReading, setIsReading] = useState(false);
-  const [isComplete, setIsComplete] = useState(false);
-  const [lastMsg, setLastMsg] = useState<string | null>(null);
+  const [readings, setReadings] = useState<NpkJson[]>([]);
+  const [isReadingStep, setIsReadingStep] = useState(false);
+  const [statusMessage, setStatusMessage] = useState<string>('Press Start to begin.');
 
   const abortRef = useRef<{ cancelled: boolean }>({ cancelled: false });
 
   useEffect(() => {
+    setCurrentStep(0);
+    setReadings([]);
+    setIsReadingStep(false);
+    setStatusMessage('Press Start to begin.');
+    abortRef.current.cancelled = false;
     return () => {
       abortRef.current.cancelled = true;
     };
   }, []);
 
   const readOnce = useCallback(async (): Promise<NpkJson | null> => {
-    // Try a fresh read first; if it fails, fall back to cached
     try {
-      const fresh = await getNpkFresh();
-      if (fresh?.ok) return fresh as NpkJson;
+      const data = await readNpkFromESP32();
+      if (data && typeof data === 'object' && 'ok' in data) {
+        return data as NpkJson;
+      }
+      console.warn('readOnce received invalid data:', data);
+      return null;
     } catch (e: any) {
-      // ignore, try cached
+      console.error('Error in readOnce:', e);
+      return null;
     }
-    try {
-      const cached = await getNpkCached();
-      if (cached?.ok) return cached as NpkJson;
-    } catch (e: any) {
-      // ignore, return null
-    }
-    return null;
   }, []);
 
-  const handleStart = useCallback(async () => {
-    setIsReading(true);
-    setCurrentStep(0);
-    setLastMsg(null);
-
-    // 0) Ensure we’re actually connected to the ESP32 AP
-    setLastMsg(`Checking Wi-Fi (${ESP_SSID})…`);
-    const ok = await connectToESP();
-    if (!ok) {
-      setIsReading(false);
-      Alert.alert(
-        'Hindi makakonekta',
-        `Tiyaking nakakonekta sa Wi-Fi “${ESP_SSID}” (password: fertisense). Buksan ang Location (Android), patayin muna ang mobile data, saka subukang muli.`
-      );
-      return;
-    }
-
-    // 1) Collect 10 readings
-    const Ns: number[] = [];
-    const Ps: number[] = [];
-    const Ks: number[] = [];
-    const pHs: number[] = [];
-
-    for (let i = 1; i <= TOTAL_STEPS; i++) {
+  const processResultsAndNavigate = useCallback(
+    async (allReadings: NpkJson[]) => {
       if (abortRef.current.cancelled) return;
-      setCurrentStep(i);
-      setLastMsg(`📍 ${i}/${TOTAL_STEPS} - Reading soil…`);
+      setCurrentStep(TOTAL_STEPS + 1);
+      setStatusMessage('Calculating average...');
 
-      // a) Do up to 2 tries for each spot
-      let data: NpkJson | null = null;
-      for (let attempt = 1; attempt <= 2 && !data; attempt++) {
-        data = await readOnce();
-        if (!data) await new Promise(r => setTimeout(r, 600));
+      const Ns = allReadings.map((r) => r.n).filter((n) => typeof n === 'number') as number[];
+      const Ps = allReadings.map((r) => r.p).filter((n) => typeof n === 'number') as number[];
+      const Ks = allReadings.map((r) => r.k).filter((n) => typeof n === 'number') as number[];
+      const pHs = allReadings.map((r) => r.ph).filter((n) => typeof n === 'number') as number[];
+
+      const avg = (arr: number[]) =>
+        arr.length ? Math.round((arr.reduce((a, b) => a + b, 0) / arr.length) * 10) / 10 : 0;
+
+      const avgN = avg(Ns);
+      const avgP = avg(Ps);
+      const avgK = avg(Ks);
+      const avgPHRaw = avg(pHs);
+      const avgPH = Number.isFinite(avgPHRaw) ? avgPHRaw : NaN;
+
+      const finalResult = {
+        n: avgN,
+        p: avgP,
+        k: avgK,
+        ph: Number.isFinite(avgPH) ? avgPH : undefined,
+        timestamp: String(Date.now()),
+        farmerId: String(farmerId ?? ''),
+        readings: allReadings,
+      };
+
+      // store in DataContext
+      setLatestSensorData(finalResult);
+
+      // also push into ReadingSessionContext (for recommendation screen)
+      try {
+        await setFromParams({
+          n: avgN,
+          p: avgP,
+          k: avgK,
+          ph: Number.isFinite(avgPH) ? avgPH : undefined,
+          farmerId: typeof farmerId === 'string' ? farmerId : undefined,
+          ts: Date.now(),
+        });
+      } catch (e) {
+        console.warn('[SensorReading] failed to set reading session:', e);
       }
 
-      if (!data) {
-        setIsReading(false);
-        Alert.alert(
-          'Walang nabasang data',
-          'Hindi nakakuha ng reading sa sensor. Subukan ilapit ang phone sa device at ulitin.'
-        );
-        return;
-      }
-
-      // b) Push if present
-      if (typeof data.n === 'number') Ns.push(data.n);
-      if (typeof data.p === 'number') Ps.push(data.p);
-      if (typeof data.k === 'number') Ks.push(data.k);
-      if (typeof data.ph === 'number') pHs.push(data.ph);
-
-      // c) Tiny pause between spots (ESP loop ~5s; we poke faster thanks to /read)
-      await new Promise(r => setTimeout(r, 700));
-    }
-
-    // 2) Compute averages (simple mean)
-    const avg = (arr: number[]) =>
-      arr.length ? Math.round((arr.reduce((a, b) => a + b, 0) / arr.length) * 10) / 10 : 0;
-
-    const avgN = avg(Ns);
-    const avgP = avg(Ps);
-    const avgK = avg(Ks);
-    const avgPH = Math.round((avg(pHs) + Number.EPSILON) * 10) / 10;
-
-    // 3) Publish to DataContext (so other screens can show “latest”)
-    const stamp = new Date().toISOString();
-    setLatestSensorData({
-      timestamp: stamp,
-      n: avgN,
-      p: avgP,
-      k: avgK,
-      ph: isFinite(avgPH) ? avgPH : undefined,
-    });
-
-    // 4) (Optional) Save to backend farmer logs if we have a farmerId + token
-    try {
-      if (farmerId && token) {
-        await addReading(
-          {
-            farmerId: String(farmerId),
-            npk: { N: avgN, P: avgP, K: avgK },
-            ph: isFinite(avgPH) ? avgPH : null,
-            source: 'esp32',
-          },
-          token
-        );
-      }
-    } catch {
-      // non-fatal; we still move to recommendation
-    }
-
-    // 5) Show success, then route to recommendation screen
-    setIsComplete(true);
-    setLastMsg('Success! Completed soil reading. Please wait for recommendation…');
-    setTimeout(() => {
+      await new Promise((r) => setTimeout(r, 1000));
       if (abortRef.current.cancelled) return;
+
       router.push({
-        pathname: '/(stakeholder)/screens/recommendation',
+        pathname: '/(stakeholder)/screens/reconnect-prompt',
         params: {
+          farmerId: finalResult.farmerId,
           n: String(avgN),
           p: String(avgP),
           k: String(avgK),
-          ph: isFinite(avgPH) ? String(avgPH) : '',
-          farmerId: String(farmerId ?? ''),
+          ph: Number.isFinite(avgPH) ? String(avgPH) : '',
         },
       });
-    }, 1200);
-  }, [connectToESP, farmerId, readOnce, router, token, setLatestSensorData]);
+    },
+    [farmerId, router, setFromParams, setLatestSensorData]
+  );
 
-  // Keep your original UI/branding; only behavior changed.
+  const handleReadNextStep = useCallback(
+    async () => {
+      if (isReadingStep || currentStep > TOTAL_STEPS || currentStep === 0) return;
+      if (abortRef.current.cancelled) return;
+
+      setIsReadingStep(true);
+      const stepToRead = currentStep;
+      const startTime = Date.now(); // ⏱ start timer for minimum duration
+      setStatusMessage(`${stepToRead}/${TOTAL_STEPS} - Reading soil...`);
+
+      let data: NpkJson | null = null;
+      for (let attempt = 1; attempt <= 2 && !data; attempt++) {
+        if (abortRef.current.cancelled) {
+          setIsReadingStep(false);
+          return;
+        }
+        data = await readOnce();
+        if (!data) await new Promise((r) => setTimeout(r, 600));
+      }
+      if (abortRef.current.cancelled) {
+        setIsReadingStep(false);
+        return;
+      }
+
+      // 🔁 ensure spinner runs at least MIN_READING_DURATION_MS
+      const elapsed = Date.now() - startTime;
+      if (elapsed < MIN_READING_DURATION_MS) {
+        await new Promise((r) => setTimeout(r, MIN_READING_DURATION_MS - elapsed));
+        if (abortRef.current.cancelled) {
+          setIsReadingStep(false);
+          return;
+        }
+      }
+
+      if (!data) {
+        setIsReadingStep(false);
+        setStatusMessage(`Failed read ${stepToRead}. Press button to try again.`);
+        Alert.alert(
+          'Walang nabasang data',
+          'Hindi nakakuha ng reading. Subukan ilapit ang phone at ulitin.'
+        );
+        return;
+      }
+      if (typeof data.n !== 'number' || typeof data.p !== 'number' || typeof data.k !== 'number') {
+        setIsReadingStep(false);
+        setStatusMessage(`Invalid data ${stepToRead}. Press button to try again.`);
+        Alert.alert('Invalid Data', `Incomplete NPK at spot ${stepToRead}.`);
+        return;
+      }
+
+      const newReadings = [...readings, data];
+      setReadings(newReadings);
+      const nextStep = stepToRead + 1;
+
+      if (nextStep > TOTAL_STEPS) {
+        setIsReadingStep(false);
+        processResultsAndNavigate(newReadings);
+      } else {
+        setCurrentStep(nextStep);
+        setStatusMessage(`Read ${stepToRead}/${TOTAL_STEPS} OK. Press for spot ${nextStep}.`);
+        setIsReadingStep(false);
+      }
+    },
+    [currentStep, isReadingStep, readOnce, readings, processResultsAndNavigate]
+  );
+
+  const handleStart = async () => {
+    if (currentStep !== 0 || isReadingStep) return;
+    setIsReadingStep(true);
+    setStatusMessage(`Checking connection to ${ESP_SSID}...`);
+    try {
+      await autoConnectToESP32();
+      if (abortRef.current.cancelled) return;
+      setCurrentStep(1);
+      setStatusMessage(`Ready to read spot 1/${TOTAL_STEPS}. Press button.`);
+    } catch (err: any) {
+      if (abortRef.current.cancelled) return;
+      Alert.alert('Connection Error', err.message || `Could not connect.`);
+      setStatusMessage('Connection failed. Try Start again.');
+    } finally {
+      if (!abortRef.current.cancelled) {
+        setIsReadingStep(false);
+      }
+    }
+  };
+
+  const displayedStep =
+    currentStep === 0
+      ? 0
+      : currentStep > TOTAL_STEPS
+      ? TOTAL_STEPS
+      : currentStep;
+
   return (
     <View style={styles.container}>
-      {/* Logo */}
       <Image
         source={require('../../../assets/images/fertisense-logo.png')}
         style={styles.logo}
       />
-
-      {/* Reading Box */}
       <View style={styles.readingBox}>
-        <Text style={styles.title}>Insert the Sensor into the Soil</Text>
-
+        <Text style={styles.title}>Insert Sensor into Soil</Text>
         <Text style={styles.engSub}>
-          The system will take 10 readings from different soil spots, including pH level.
+          Take {TOTAL_STEPS} readings. Press button for each spot.
         </Text>
         <Text style={styles.tagalogSub}>
-          Kukuha ang sistema ng 10 readings mula sa iba't ibang bahagi ng lupa, kabilang ang pH level.
+          Kumuha ng {TOTAL_STEPS} readings. Pindutin ang button kada spot.
         </Text>
 
-        {isReading && currentStep <= TOTAL_STEPS && (
-          <>
-            <ActivityIndicator
-              size="large"
-              color="#2e7d32"
-              style={{ marginTop: 20, marginBottom: 12 }}
-            />
-            <Text style={styles.readingStep}>
-              📍 {currentStep}/{TOTAL_STEPS} - Reading soil...
-            </Text>
-            {!!lastMsg && (
-              <Text style={{ marginTop: 8, color: '#2e7d32' }}>{lastMsg}</Text>
-            )}
-          </>
-        )}
-
-        {isComplete && (
-          <View style={styles.successBox}>
-            <Ionicons name="checkmark-circle" size={50} color="#2e7d32" />
-            <Text style={styles.successText}>
-              Success! Completed soil reading. Please wait for recommendation...
-            </Text>
+        {/* BIG CIRCULAR LOADER */}
+        <View style={styles.statusDisplay}>
+          <View style={styles.progressCircle}>
+            <View style={styles.progressInner}>
+              {isReadingStep ? (
+                <ActivityIndicator size="small" color="#2e7d32" style={styles.circleSpinner} />
+              ) : (
+                <Ionicons name="leaf-outline" size={24} color="#2e7d32" style={styles.circleSpinner} />
+              )}
+              <Text style={styles.progressLabel}>Spot</Text>
+              <Text style={styles.progressStep}>
+                {displayedStep} / {TOTAL_STEPS}
+              </Text>
+            </View>
           </View>
-        )}
+
+          <Text style={styles.statusText}>{statusMessage}</Text>
+        </View>
       </View>
 
-      {/* Start Button */}
-      {!isReading && !isComplete && (
-        <TouchableOpacity style={styles.startButton} onPress={handleStart}>
-          <Ionicons name="hardware-chip-outline" size={22} color="#fff" />
-          <Text style={styles.startText}>  Simulan ang Pagbasa</Text>
-        </TouchableOpacity>
-      )}
+      <View style={styles.buttonContainer}>
+        {currentStep === 0 && (
+          <TouchableOpacity
+            style={[styles.actionButton, isReadingStep && styles.disabledButton]}
+            onPress={handleStart}
+            disabled={isReadingStep}
+          >
+            <Ionicons
+              name="hardware-chip-outline"
+              size={22}
+              color={isReadingStep ? '#eee' : '#fff'}
+            />
+            <Text
+              style={[
+                styles.actionButtonText,
+                isReadingStep && styles.disabledButtonText,
+              ]}
+            >
+              {isReadingStep ? 'Checking...' : 'Start Reading'}
+            </Text>
+          </TouchableOpacity>
+        )}
+
+        {currentStep > 0 && currentStep <= TOTAL_STEPS && (
+          <TouchableOpacity
+            style={[styles.actionButton, isReadingStep && styles.disabledButton]}
+            onPress={handleReadNextStep}
+            disabled={isReadingStep}
+          >
+            <Ionicons
+              name="radio-button-on-outline"
+              size={22}
+              color={isReadingStep ? '#eee' : '#fff'}
+            />
+            <Text
+              style={[
+                styles.actionButtonText,
+                isReadingStep && styles.disabledButtonText,
+              ]}
+            >
+              {isReadingStep
+                ? `Reading Spot ${currentStep}...`
+                : `Read Spot ${currentStep}/${TOTAL_STEPS}`}
+            </Text>
+          </TouchableOpacity>
+        )}
+
+        {currentStep > TOTAL_STEPS && (
+          <TouchableOpacity
+            style={[styles.actionButton, styles.disabledButton]}
+            disabled
+          >
+            <ActivityIndicator
+              size="small"
+              color="#eee"
+              style={{ marginRight: 10 }}
+            />
+            <Text style={[styles.actionButtonText, styles.disabledButtonText]}>
+              Processing...
+            </Text>
+          </TouchableOpacity>
+        )}
+      </View>
     </View>
   );
 }
@@ -238,17 +337,12 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#ffffffff',
     alignItems: 'center',
-    paddingTop: 60,
+    paddingTop: 40,
     paddingHorizontal: 24,
     justifyContent: 'flex-start',
   },
-  logo: {
-    bottom: 12,
-    width: 220,
-    height: 220,
-    resizeMode: 'contain',
-    marginBottom: -30,
-  },
+  logo: { width: 200, height: 200, resizeMode: 'contain', marginBottom: -10 },
+
   readingBox: {
     backgroundColor: '#f1fbf1',
     padding: 26,
@@ -256,53 +350,76 @@ const styles = StyleSheet.create({
     width: '100%',
     elevation: 5,
     alignItems: 'center',
+    marginBottom: 28,
   },
   title: {
     fontSize: 20,
     fontWeight: 'bold',
     color: '#2e7d32',
-    fontFamily: 'Poppins_700Bold',
     textAlign: 'center',
-    marginBottom: 20,
+    marginBottom: 12,
   },
-  engSub: {
-    fontSize: 15,
-    color: '#555',
-    textAlign: 'center',
-    fontFamily: 'Poppins_400Regular',
-  },
+  engSub: { fontSize: 15, color: '#555', textAlign: 'center', marginBottom: 6 },
   tagalogSub: {
     fontSize: 13,
     color: '#555',
     textAlign: 'center',
-    fontFamily: 'Poppins_400Regular',
     fontStyle: 'italic',
     marginBottom: 20,
-    marginTop: 6,
   },
-  readingStep: {
+
+  statusDisplay: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '100%',
+    marginTop: 4,
+  },
+
+  // big circle
+  progressCircle: {
+    width: 150,
+    height: 150,
+    borderRadius: 75,
+    borderWidth: 8,
+    borderColor: '#2e7d32',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 12,
+    backgroundColor: '#ffffff',
+  },
+  progressInner: {
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    backgroundColor: '#e9f7ec',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  circleSpinner: {
+    marginBottom: 4,
+  },
+  progressLabel: {
+    fontSize: 14,
+    color: '#2e7d32',
+    fontWeight: '600',
+  },
+  progressStep: {
+    fontSize: 18,
+    color: '#1b5e20',
+    fontWeight: '800',
+    marginTop: 2,
+  },
+
+  statusText: {
     fontSize: 16,
     color: '#2e7d32',
-    fontFamily: 'Poppins_600SemiBold',
+    fontWeight: '600',
     textAlign: 'center',
+    marginTop: 5,
   },
-  successBox: {
-    backgroundColor: '#d1f7d6',
-    padding: 20,
-    borderRadius: 16,
-    alignItems: 'center',
-    marginTop: 20,
-    width: '100%',
-  },
-  successText: {
-    fontSize: 15,
-    color: '#1b5e20',
-    fontFamily: 'Poppins_600SemiBold',
-    textAlign: 'center',
-    marginTop: 12,
-  },
-  startButton: {
-    marginTop: 28,
+
+  buttonContainer: {},
+  actionButton: {
     backgroundColor: '#2e7d32',
     flexDirection: 'row',
     paddingVertical: 14,
@@ -310,10 +427,10 @@ const styles = StyleSheet.create({
     borderRadius: 40,
     alignItems: 'center',
     justifyContent: 'center',
+    elevation: 3,
+    minWidth: 250,
   },
-  startText: {
-    color: '#fff',
-    fontSize: 16,
-    fontFamily: 'Poppins_600SemiBold',
-  },
+  actionButtonText: { color: '#fff', fontSize: 16, fontWeight: '600', marginLeft: 8 },
+  disabledButton: { backgroundColor: '#a5d6a7', elevation: 1 },
+  disabledButtonText: { color: '#eee' },
 });

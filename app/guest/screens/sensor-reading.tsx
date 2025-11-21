@@ -1,272 +1,436 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useCallback, useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  Alert,
+  Image,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from 'react-native';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
 
-// --- Mocks for missing imports ---
+import { autoConnectToESP32, readNpkFromESP32, ESP_SSID } from '../../../src/esp32';
+import { useData } from '../../../context/DataContext';
+import { useAuth } from '../../../context/AuthContext';
+import { useReadingSession } from '../../../context/ReadingSessionContext';
 
-// Mock React Native components with web equivalents
-const View = ({ style, children }: { style?: any; children: React.ReactNode }) => <div style={style}>{children}</div>;
-const Text = ({ style, children }: { style?: any; children: React.ReactNode }) => <p style={style}>{children}</p>;
-const Image = ({ style, source }: { style?: any; source: { uri: string } }) => <img style={style} src={source.uri} alt="logo" />;
-const TouchableOpacity = ({ style, children, onPress }: { style?: any; children: React.ReactNode; onPress: () => void }) => (
-  <button style={{ ...style, cursor: 'pointer', border: 'none', background: 'none' }} onClick={onPress}>
-    {children}
-  </button>
-);
-const ActivityIndicator = ({ style }: { style?: any }) => <div style={{...style, display: 'inline-block', border: '4px solid rgba(0, 0, 0, 0.1)', borderLeftColor: '#2e7d32', borderRadius: '50%', width: '30px', height: '30px', animation: 'spin 1s linear infinite'}}></div>;
-
-// Mock Ionicons
-const Ionicons = ({ name, size, color }: { name: string; size: number; color: string }) => {
-  let icon = '❓';
-  if (name === 'checkmark-circle') icon = '✅';
-  if (name === 'hardware-chip-outline') icon = '🎛️';
-  return <span style={{ fontSize: size, color: color, verticalAlign: 'middle' }}>{icon}</span>;
+type NpkJson = {
+  ok?: boolean;
+  ts?: number;
+  n?: number;
+  p?: number;
+  k?: number;
+  ph?: number;
+  ec?: number;
+  n_kg_ha?: number;
+  p_kg_ha?: number;
+  k_kg_ha?: number;
+  error?: string;
 };
 
-// Mock the Alert API
-const Alert = {
-  alert: (title: string, message: string) => {
-    console.warn(`ALERT: ${title} - ${message}`);
-    // In a real web app, you'd use a modal here, not window.alert
-    // window.alert(`${title}\n\n${message}`); 
-  },
-};
-
-// Mock functions from external files
-const autoConnectToESP32 = async () => {
-  console.log('Mock: autoConnectToESP32() called');
-  // Simulate a delay
-  await new Promise(res => setTimeout(res, 500));
-};
-
-const readNpkFromESP32 = async () => {
-  console.log('Mock: readNpkFromESP32() called');
-  // Simulate a delay and return mock data
-  await new Promise(res => setTimeout(res, 500));
-  const mockData = {
-    ok: true,
-    ts: Date.now(),
-    ec: 120 + Math.floor(Math.random() * 50),
-    n: 50 + Math.floor(Math.random() * 20),
-    p: 20 + Math.floor(Math.random() * 10),
-    k: 30 + Math.floor(Math.random() * 10),
-    ph: 6.0 + Math.random(),
-  };
-  return mockData;
-};
-
-// Mock context
-const useReadingSession = () => ({
-  setResult: (result: any) => {
-    console.log('Mock: setResult called with:', result);
-  },
-});
-
-// Mock router
-const useRouter = () => ({
-  push: (path: string) => {
-    console.log(`Mock: router.push to ${path}`);
-    // In a real web app, you might use window.location.href
-  },
-});
-// --- End of Mocks ---
-
+const TOTAL_STEPS = 10;
+// 🔁 minimum time for each spot reading so spinner does a “full circle”
+const MIN_READING_DURATION_MS = 3000;
 
 export default function SensorReadingScreen() {
   const router = useRouter();
-  const { setResult } = useReadingSession();
+  const { farmerId } = useLocalSearchParams<{ farmerId?: string }>();
+  const { setLatestSensorData } = useData();
+  const { token } = useAuth(); // reserved if needed later
+  const { setFromParams } = useReadingSession();
 
   const [currentStep, setCurrentStep] = useState(0);
-  const [isReading, setIsReading] = useState(false);
-  const [isComplete, setIsComplete] = useState(false);
-  const [readings, setReadings] = useState<any[]>([]);
+  const [readings, setReadings] = useState<NpkJson[]>([]);
+  const [isReadingStep, setIsReadingStep] = useState(false);
+  const [statusMessage, setStatusMessage] = useState<string>('Press Start to begin.');
 
-  const doOneRead = async () => {
-    try {
-      if (currentStep === 0) await autoConnectToESP32();
-      const res: any = await readNpkFromESP32();
-      if (!res?.ok) throw new Error(res?.error || 'No data');
-      return res;
-    } catch (err: any) {
-      const message = (err instanceof Error) ? err.message : 'Failed to read from ESP32';
-      throw new Error(message);
-    }
-  };
+  const abortRef = useRef<{ cancelled: boolean }>({ cancelled: false });
 
   useEffect(() => {
-    let timeout: ReturnType<typeof setTimeout>;
-    if (isReading && currentStep < 10) {
-      timeout = setTimeout(async () => {
-        try {
-          const r = await doOneRead();
-          const newReadings = [...readings, r];
-          setReadings(newReadings);
-          setCurrentStep((s) => s + 1);
-
-          if (newReadings.length === 10) {
-            const arr = newReadings;
-            const avg = (k: string) =>
-              arr.reduce((a: number, v: any) => a + Number(v[k] || 0), 0) /
-              arr.length;
-
-            const N = +avg('n').toFixed(1);
-            const P = +avg('p').toFixed(1);
-            const K = +avg('k').toFixed(1);
-            const pH = +avg('ph').toFixed(1);
-
-            setReadings([]);
-            setIsComplete(true);
-            setResult({ n: N, p: P, k: K, ph: pH, ts: Date.now() });
-
-            setTimeout(() => {
-              router.push('/guest/screens/recommendation');
-            }, 1200);
-          }
-        } catch (err: any) {
-          const message = (err instanceof Error) ? err.message : 'Please connect to ESP32-NPK Wi-Fi before reading.';
-          Alert.alert(
-            'Connection Error',
-            message
-          );
-          setIsReading(false);
-          setCurrentStep(0);
-        }
-      }, 1000);
-    }
-    return () => clearTimeout(timeout);
-  }, [isReading, currentStep, router, setResult, readings]);
-
-  const handleStart = () => {
-    setReadings([]);
-    setIsReading(true);
     setCurrentStep(0);
+    setReadings([]);
+    setIsReadingStep(false);
+    setStatusMessage('Press Start to begin.');
+    abortRef.current.cancelled = false;
+    return () => {
+      abortRef.current.cancelled = true;
+    };
+  }, []);
+
+  const readOnce = useCallback(async (): Promise<NpkJson | null> => {
+    try {
+      const data = await readNpkFromESP32();
+      if (data && typeof data === 'object' && 'ok' in data) {
+        return data as NpkJson;
+      }
+      console.warn('readOnce received invalid data:', data);
+      return null;
+    } catch (e: any) {
+      console.error('Error in readOnce:', e);
+      return null;
+    }
+  }, []);
+
+  const processResultsAndNavigate = useCallback(
+    async (allReadings: NpkJson[]) => {
+      if (abortRef.current.cancelled) return;
+      setCurrentStep(TOTAL_STEPS + 1);
+      setStatusMessage('Calculating average...');
+
+      const Ns = allReadings.map((r) => r.n).filter((n) => typeof n === 'number') as number[];
+      const Ps = allReadings.map((r) => r.p).filter((n) => typeof n === 'number') as number[];
+      const Ks = allReadings.map((r) => r.k).filter((n) => typeof n === 'number') as number[];
+      const pHs = allReadings.map((r) => r.ph).filter((n) => typeof n === 'number') as number[];
+
+      const avg = (arr: number[]) =>
+        arr.length ? Math.round((arr.reduce((a, b) => a + b, 0) / arr.length) * 10) / 10 : 0;
+
+      const avgN = avg(Ns);
+      const avgP = avg(Ps);
+      const avgK = avg(Ks);
+      const avgPHRaw = avg(pHs);
+      const avgPH = Number.isFinite(avgPHRaw) ? avgPHRaw : NaN;
+
+      const finalResult = {
+        n: avgN,
+        p: avgP,
+        k: avgK,
+        ph: Number.isFinite(avgPH) ? avgPH : undefined,
+        timestamp: String(Date.now()),
+        farmerId: String(farmerId ?? ''),
+        readings: allReadings,
+      };
+
+      // store in DataContext
+      setLatestSensorData(finalResult);
+
+      // also push into ReadingSessionContext (for recommendation screen)
+      try {
+        await setFromParams({
+          n: avgN,
+          p: avgP,
+          k: avgK,
+          ph: Number.isFinite(avgPH) ? avgPH : undefined,
+          farmerId: typeof farmerId === 'string' ? farmerId : undefined,
+          ts: Date.now(),
+        });
+      } catch (e) {
+        console.warn('[SensorReading] failed to set reading session:', e);
+      }
+
+      await new Promise((r) => setTimeout(r, 1000));
+      if (abortRef.current.cancelled) return;
+
+      router.push({
+        pathname: '/guest/screens/reconnect-prompt',
+        params: {
+          farmerId: finalResult.farmerId,
+          n: String(avgN),
+          p: String(avgP),
+          k: String(avgK),
+          ph: Number.isFinite(avgPH) ? String(avgPH) : '',
+        },
+      });
+    },
+    [farmerId, router, setFromParams, setLatestSensorData]
+  );
+
+  const handleReadNextStep = useCallback(
+    async () => {
+      if (isReadingStep || currentStep > TOTAL_STEPS || currentStep === 0) return;
+      if (abortRef.current.cancelled) return;
+
+      setIsReadingStep(true);
+      const stepToRead = currentStep;
+      const startTime = Date.now(); // ⏱ start timer for minimum duration
+      setStatusMessage(`${stepToRead}/${TOTAL_STEPS} - Reading soil...`);
+
+      let data: NpkJson | null = null;
+      for (let attempt = 1; attempt <= 2 && !data; attempt++) {
+        if (abortRef.current.cancelled) {
+          setIsReadingStep(false);
+          return;
+        }
+        data = await readOnce();
+        if (!data) await new Promise((r) => setTimeout(r, 600));
+      }
+      if (abortRef.current.cancelled) {
+        setIsReadingStep(false);
+        return;
+      }
+
+      // 🔁 ensure spinner runs at least MIN_READING_DURATION_MS
+      const elapsed = Date.now() - startTime;
+      if (elapsed < MIN_READING_DURATION_MS) {
+        await new Promise((r) => setTimeout(r, MIN_READING_DURATION_MS - elapsed));
+        if (abortRef.current.cancelled) {
+          setIsReadingStep(false);
+          return;
+        }
+      }
+
+      if (!data) {
+        setIsReadingStep(false);
+        setStatusMessage(`Failed read ${stepToRead}. Press button to try again.`);
+        Alert.alert(
+          'Walang nabasang data',
+          'Hindi nakakuha ng reading. Subukan ilapit ang phone at ulitin.'
+        );
+        return;
+      }
+      if (typeof data.n !== 'number' || typeof data.p !== 'number' || typeof data.k !== 'number') {
+        setIsReadingStep(false);
+        setStatusMessage(`Invalid data ${stepToRead}. Press button to try again.`);
+        Alert.alert('Invalid Data', `Incomplete NPK at spot ${stepToRead}.`);
+        return;
+      }
+
+      const newReadings = [...readings, data];
+      setReadings(newReadings);
+      const nextStep = stepToRead + 1;
+
+      if (nextStep > TOTAL_STEPS) {
+        setIsReadingStep(false);
+        processResultsAndNavigate(newReadings);
+      } else {
+        setCurrentStep(nextStep);
+        setStatusMessage(`Read ${stepToRead}/${TOTAL_STEPS} OK. Press for spot ${nextStep}.`);
+        setIsReadingStep(false);
+      }
+    },
+    [currentStep, isReadingStep, readOnce, readings, processResultsAndNavigate]
+  );
+
+  const handleStart = async () => {
+    if (currentStep !== 0 || isReadingStep) return;
+    setIsReadingStep(true);
+    setStatusMessage(`Checking connection to ${ESP_SSID}...`);
+    try {
+      await autoConnectToESP32();
+      if (abortRef.current.cancelled) return;
+      setCurrentStep(1);
+      setStatusMessage(`Ready to read spot 1/${TOTAL_STEPS}. Press button.`);
+    } catch (err: any) {
+      if (abortRef.current.cancelled) return;
+      Alert.alert('Connection Error', err.message || `Could not connect.`);
+      setStatusMessage('Connection failed. Try Start again.');
+    } finally {
+      if (!abortRef.current.cancelled) {
+        setIsReadingStep(false);
+      }
+    }
   };
 
-  // Mock placeholder for the image
-  const logoSource = { uri: 'https://placehold.co/220x220/ffffff/2e7d32?text=FertiSense&font=inter' };
+  const displayedStep =
+    currentStep === 0
+      ? 0
+      : currentStep > TOTAL_STEPS
+      ? TOTAL_STEPS
+      : currentStep;
 
   return (
     <View style={styles.container}>
       <Image
-        source={logoSource}
+        source={require('../../../assets/images/fertisense-logo.png')}
         style={styles.logo}
       />
       <View style={styles.readingBox}>
-        <Text style={styles.title}>Insert the Sensor into the Soil</Text>
+        <Text style={styles.title}>Insert Sensor into Soil</Text>
         <Text style={styles.engSub}>
-          The system will take 10 readings from different soil spots, including
-          pH level.
+          Take {TOTAL_STEPS} readings. Press button for each spot.
         </Text>
         <Text style={styles.tagalogSub}>
-          Kukuha ang sistema ng 10 readings mula sa iba't ibang bahagi ng lupa,
-          kabilang ang pH level.
+          Kumuha ng {TOTAL_STEPS} readings. Pindutin ang button kada spot.
         </Text>
 
-        {isReading && currentStep <= 10 && (
-          <>
-            <ActivityIndicator style={{ marginTop: 20, marginBottom: 12 }} />
-            <Text style={styles.readingStep}>
-              📍 {currentStep}/10 - Reading soil...
-            </Text>
-          </>
-        )}
-
-        {isComplete && (
-          <View style={styles.successBox}>
-            <Ionicons name="checkmark-circle" size={50} color="#2e7d32" />
-            <Text style={styles.successText}>
-              Success! Completed soil reading. Please wait for
-              recommendation...
-            </Text>
+        {/* BIG CIRCULAR LOADER */}
+        <View style={styles.statusDisplay}>
+          <View style={styles.progressCircle}>
+            <View style={styles.progressInner}>
+              {isReadingStep ? (
+                <ActivityIndicator size="small" color="#2e7d32" style={styles.circleSpinner} />
+              ) : (
+                <Ionicons name="leaf-outline" size={24} color="#2e7d32" style={styles.circleSpinner} />
+              )}
+              <Text style={styles.progressLabel}>Spot</Text>
+              <Text style={styles.progressStep}>
+                {displayedStep} / {TOTAL_STEPS}
+              </Text>
+            </View>
           </View>
-        )}
+
+          <Text style={styles.statusText}>{statusMessage}</Text>
+        </View>
       </View>
 
-      {!isReading && !isComplete && (
-        <TouchableOpacity style={styles.startButton} onPress={handleStart}>
-          <Ionicons name="hardware-chip-outline" size={22} color="#fff" />
-          <span style={styles.startText}>  Simulan ang Pagbasa</span>
-        </TouchableOpacity>
-      )}
+      <View style={styles.buttonContainer}>
+        {currentStep === 0 && (
+          <TouchableOpacity
+            style={[styles.actionButton, isReadingStep && styles.disabledButton]}
+            onPress={handleStart}
+            disabled={isReadingStep}
+          >
+            <Ionicons
+              name="hardware-chip-outline"
+              size={22}
+              color={isReadingStep ? '#eee' : '#fff'}
+            />
+            <Text
+              style={[
+                styles.actionButtonText,
+                isReadingStep && styles.disabledButtonText,
+              ]}
+            >
+              {isReadingStep ? 'Checking...' : 'Start Reading'}
+            </Text>
+          </TouchableOpacity>
+        )}
+
+        {currentStep > 0 && currentStep <= TOTAL_STEPS && (
+          <TouchableOpacity
+            style={[styles.actionButton, isReadingStep && styles.disabledButton]}
+            onPress={handleReadNextStep}
+            disabled={isReadingStep}
+          >
+            <Ionicons
+              name="radio-button-on-outline"
+              size={22}
+              color={isReadingStep ? '#eee' : '#fff'}
+            />
+            <Text
+              style={[
+                styles.actionButtonText,
+                isReadingStep && styles.disabledButtonText,
+              ]}
+            >
+              {isReadingStep
+                ? `Reading Spot ${currentStep}...`
+                : `Read Spot ${currentStep}/${TOTAL_STEPS}`}
+            </Text>
+          </TouchableOpacity>
+        )}
+
+        {currentStep > TOTAL_STEPS && (
+          <TouchableOpacity
+            style={[styles.actionButton, styles.disabledButton]}
+            disabled
+          >
+            <ActivityIndicator
+              size="small"
+              color="#eee"
+              style={{ marginRight: 10 }}
+            />
+            <Text style={[styles.actionButtonText, styles.disabledButtonText]}>
+              Processing...
+            </Text>
+          </TouchableOpacity>
+        )}
+      </View>
     </View>
   );
 }
 
-// Converted StyleSheet to plain CSS-in-JS objects for web
-const styles = {
+const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#ffffffff',
     alignItems: 'center',
-    paddingTop: 60,
-    paddingLeft: 24,
-    paddingRight: 24,
+    paddingTop: 40,
+    paddingHorizontal: 24,
     justifyContent: 'flex-start',
-    fontFamily: 'Inter, sans-serif',
-    boxSizing: 'border-box' as 'border-box',
-    width: '100%',
-    maxWidth: '400px',
-    margin: '0 auto',
   },
-  logo: {
-    bottom: 12,
-    width: 220,
-    height: 220,
-    objectFit: 'contain' as 'contain',
-    marginBottom: -30,
-  },
+  logo: { width: 200, height: 200, resizeMode: 'contain', marginBottom: -10 },
+
   readingBox: {
     backgroundColor: '#f1fbf1',
     padding: 26,
     borderRadius: 18,
     width: '100%',
-    boxShadow: '0 4px 12px rgba(0,0,0,0.05)',
+    elevation: 5,
     alignItems: 'center',
-    boxSizing: 'border-box' as 'border-box',
+    marginBottom: 28,
   },
   title: {
     fontSize: 20,
     fontWeight: 'bold',
     color: '#2e7d32',
-    textAlign: 'center' as 'center',
-    marginBottom: 20,
-    marginTop: 0,
+    textAlign: 'center',
+    marginBottom: 12,
   },
-  engSub: { fontSize: 15, color: '#555', textAlign: 'center' as 'center', margin: 0 },
+  engSub: { fontSize: 15, color: '#555', textAlign: 'center', marginBottom: 6 },
   tagalogSub: {
     fontSize: 13,
     color: '#555',
-    textAlign: 'center' as 'center',
+    textAlign: 'center',
     fontStyle: 'italic',
     marginBottom: 20,
-    marginTop: 6,
   },
-  readingStep: { fontSize: 16, color: '#2e7d32', textAlign: 'center' as 'center', margin: 0 },
-  successBox: {
-    backgroundColor: '#d1f7d6',
-    padding: 20,
-    borderRadius: 16,
+
+  statusDisplay: {
     alignItems: 'center',
-    marginTop: 20,
+    justifyContent: 'center',
     width: '100%',
-    boxSizing: 'border-box' as 'border-box',
+    marginTop: 4,
   },
-  successText: {
-    fontSize: 15,
+
+  // big circle
+  progressCircle: {
+    width: 150,
+    height: 150,
+    borderRadius: 75,
+    borderWidth: 8,
+    borderColor: '#2e7d32',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 12,
+    backgroundColor: '#ffffff',
+  },
+  progressInner: {
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    backgroundColor: '#e9f7ec',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  circleSpinner: {
+    marginBottom: 4,
+  },
+  progressLabel: {
+    fontSize: 14,
+    color: '#2e7d32',
+    fontWeight: '600',
+  },
+  progressStep: {
+    fontSize: 18,
     color: '#1b5e20',
-    textAlign: 'center' as 'center',
-    marginTop: 12,
-    marginBlock: 0,
+    fontWeight: '800',
+    marginTop: 2,
   },
-  startButton: {
-    marginTop: 28,
+
+  statusText: {
+    fontSize: 16,
+    color: '#2e7d32',
+    fontWeight: '600',
+    textAlign: 'center',
+    marginTop: 5,
+  },
+
+  buttonContainer: {},
+  actionButton: {
     backgroundColor: '#2e7d32',
-    display: 'flex',
-    flexDirection: 'row' as 'row',
-    padding: '14px 32px',
+    flexDirection: 'row',
+    paddingVertical: 14,
+    paddingHorizontal: 32,
     borderRadius: 40,
     alignItems: 'center',
     justifyContent: 'center',
-    color: '#fff',
+    elevation: 3,
+    minWidth: 250,
   },
-  startText: { color: '#fff', fontSize: 16, marginLeft: 8 },
-};
-
+  actionButtonText: { color: '#fff', fontSize: 16, fontWeight: '600', marginLeft: 8 },
+  disabledButton: { backgroundColor: '#a5d6a7', elevation: 1 },
+  disabledButtonText: { color: '#eee' },
+});

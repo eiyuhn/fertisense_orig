@@ -1,7 +1,11 @@
+// =============================================================
+// File: app/(stakeholder)/tabs/stakeholder-home.tsx
+// Purpose: Stakeholder home screen with quick actions.
+// =============================================================
+
 import { Ionicons } from '@expo/vector-icons';
-import { useFocusEffect } from '@react-navigation/native';
 import { useRouter } from 'expo-router';
-import React, { useCallback, useState } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   Image,
   ScrollView,
@@ -9,9 +13,16 @@ import {
   Text,
   TouchableOpacity,
   View,
+  Alert,
 } from 'react-native';
 import { useAuth } from '../../../context/AuthContext';
 import { useData } from '../../../context/DataContext';
+import { useNavigation, useFocusEffect } from '@react-navigation/native';
+import { BASE_URL } from '../../../src/api';
+
+const sensorImg = require('../../../assets/images/connect-sensor.png');
+const farmerImg = require('../../../assets/images/farmer-data.png');
+const priceImg = require('../../../assets/images/ferti-price.png');
 
 const getFormattedDate = () => {
   const options = {
@@ -25,65 +36,115 @@ const getFormattedDate = () => {
 
 export default function StakeholderHome() {
   const router = useRouter();
-  const { user } = useAuth();
+  const navigation = useNavigation();
+  const { user, logout } = useAuth();
   const { latestSensorData } = useData();
 
-  const [profileImageUrl, setProfileImageUrl] = useState(user?.profileImage || null);
+  // Use backend field `photoUrl` and cache-bust when it changes
+  const [profileImageUrl, setProfileImageUrl] = useState<string | null>(
+    user?.photoUrl || null
+  );
+  const [imgKey, setImgKey] = useState<number>(Date.now());
 
   useFocusEffect(
     useCallback(() => {
-      setProfileImageUrl(user?.profileImage || null);
-    }, [user?.profileImage])
+      const url = user?.photoUrl || null;
+      setProfileImageUrl(url);
+      setImgKey(Date.now());
+
+      // ✅ Only intercept hardware back (GO_BACK). Allow tab switches & pushes.
+      const unsubscribe = navigation.addListener('beforeRemove', (e: any) => {
+        if (e?.data?.action?.type !== 'GO_BACK') return; // let other actions proceed
+        if (!navigation.isFocused()) return;
+
+        e.preventDefault();
+
+        Alert.alert(
+          'Confirm Logout',
+          'You must log out to leave the application. Do you want to log out now?',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            {
+              text: 'Logout',
+              style: 'destructive',
+              onPress: async () => {
+                await logout();
+                router.replace('/login');
+              },
+            },
+          ]
+        );
+      });
+
+      return () => {
+        unsubscribe();
+      };
+    }, [user?.photoUrl, navigation, logout, router])
   );
+
+  // Build absolute URL with cache-busting
+  const buildPhotoUrl = (u?: string | null) => {
+    if (!u) return null;
+    const raw = u.startsWith('http') ? u : `${BASE_URL}${u}`;
+    return `${raw}?t=${imgKey}`;
+  };
+  const fullPhotoUrl = buildPhotoUrl(profileImageUrl);
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
       {/* HEADER */}
       <View style={styles.headerSection}>
         <View style={styles.headerTop}>
-          <View>
+          <View style={styles.welcomeTextContainer}>
             <Text style={styles.headerText}>Welcome,</Text>
             <Text style={styles.boldHeaderText}>{user?.name || 'Stakeholder'}!</Text>
             <Text style={styles.dateText}>{getFormattedDate()}</Text>
           </View>
+
+          {/* Profile avatar → Profile screen */}
           <TouchableOpacity
             style={styles.profileContainer}
             onPress={() => router.push('/(stakeholder)/tabs/stakeholder-profile')}
+            accessibilityRole="button"
+            accessibilityLabel="Open profile"
           >
-            {profileImageUrl ? (
-              <Image source={{ uri: profileImageUrl }} style={styles.profileImage} />
+            {fullPhotoUrl ? (
+              <Image
+                key={imgKey}
+                source={{ uri: fullPhotoUrl }}
+                style={styles.profileImage}
+                onError={() => {
+                  // fallback to default avatar
+                }}
+              />
             ) : (
-              <Ionicons name="person-circle-outline" size={50} color="#fff" />
+              <View style={styles.defaultAvatarStyle}>
+                <Ionicons name="person" size={30} color="#fff" />
+              </View>
             )}
           </TouchableOpacity>
         </View>
       </View>
 
-      {/* CONTENT */}
       <View style={styles.cardWrapper}>
-        {/* Available Actions */}
         <SectionLabel text="📌 Available Actions" />
         <ActionCard
           color="#e6f4ea"
-          icon={
-            <Image
-              source={require('../../../assets/images/connect-sensor.png')}
-              style={styles.sensorImage}
-            />
-          }
+          icon={<Image source={sensorImg} style={styles.sensorImage} />}
           title="Connect to Sensor"
           subtitle="Measure NPK Soil"
           onPress={() => router.push('/(stakeholder)/tabs/connect-instructions')}
           iconColor="#2e7d32"
         />
 
-        {/* Farm Insights */}
         <SectionLabel text="📊 Farm Insights" />
         {latestSensorData ? (
           <InfoCard
             color="#fce4ec"
             imageUri="https://cdn-icons-png.flaticon.com/512/2906/2906278.png"
-            title={`Latest Reading: ${new Date(latestSensorData.timestamp).toLocaleString('en-PH')}`}
+            title={`Latest Reading: ${new Date(
+              latestSensorData.timestamp
+            ).toLocaleString('en-PH')}`}
             subtitle={`Nitrogen (N): ${latestSensorData.n} | Phosphorus (P): ${latestSensorData.p} | Potassium (K): ${latestSensorData.k}${
               latestSensorData.ph !== undefined ? ` | pH: ${latestSensorData.ph}` : ''
             }`}
@@ -99,7 +160,6 @@ export default function StakeholderHome() {
           />
         )}
 
-        {/* Soil Health Tips */}
         <SectionLabel text="🌱 Soil Health Tips" />
         <InfoCard
           color="#fffde7"
@@ -107,7 +167,6 @@ export default function StakeholderHome() {
           subtitle="Avoid compacting wet soil with machinery to protect structure."
         />
 
-        {/* Help & Support */}
         <SectionLabel text="❓ Help & Support" />
         <ActionCard
           color="#e3f2fd"
@@ -187,6 +246,7 @@ const styles = StyleSheet.create({
   container: {
     flexGrow: 1,
     backgroundColor: '#fff',
+    paddingBottom: 10,
   },
   headerSection: {
     backgroundColor: '#0d5213',
@@ -197,21 +257,38 @@ const styles = StyleSheet.create({
   },
   headerTop: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
+    alignItems: 'center',
+    justifyContent: 'space-between',
   },
+  welcomeTextContainer: { flexShrink: 1 },
   profileContainer: {
-    marginLeft: 'auto',
-    marginTop: -5,
+    width: 40,
+    height: 40,
+    borderRadius: 20, // corrected to match width/height
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  defaultAvatarStyle: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#388e3c',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1.5,
+    borderColor: '#ffffff',
   },
   headerText: {
     fontSize: 20,
     color: '#fff',
     fontFamily: 'Poppins_400Regular',
+    lineHeight: 28,
   },
   boldHeaderText: {
     fontSize: 31,
     color: '#fff',
     fontFamily: 'Poppins_700Bold',
+    lineHeight: 34,
   },
   dateText: {
     fontSize: 13,
@@ -221,7 +298,7 @@ const styles = StyleSheet.create({
   profileImage: {
     width: 40,
     height: 40,
-    borderRadius: 25,
+    borderRadius: 20, // match the container
     borderWidth: 3,
     borderColor: '#fff',
   },

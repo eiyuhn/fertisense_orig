@@ -10,7 +10,7 @@ export const BASE_URL = RAW_BASE.replace(/\/+$/, "");
 
 export const api = axios.create({
   baseURL: BASE_URL,
-  timeout: 15000,
+  timeout: 30000,
 });
 
 export function authHeader(token?: string): Record<string, string> {

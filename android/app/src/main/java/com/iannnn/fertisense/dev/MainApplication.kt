@@ -1,4 +1,4 @@
-package com.iannnn.fertisense
+package com.iannnn.fertisense.dev
 
 import android.app.Application
 import android.content.res.Configuration

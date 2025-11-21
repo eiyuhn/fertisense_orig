@@ -1,205 +1,155 @@
-import React, { useState } from 'react';
+// app/admin/tabs/connect-instructions.tsx
 import { Ionicons } from '@expo/vector-icons';
-import { useRouter, useLocalSearchParams } from 'expo-router';
-import {
-  ActivityIndicator,
-  Alert,
-  Image,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TouchableOpacity,
-  View,
-} from 'react-native';
-import { connectToESP } from '../../../src/esp32';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import React from 'react';
+import { ScrollView, StyleSheet, Text, TouchableOpacity, View, Image } from 'react-native';
 
-const logo = require('../../../assets/images/fertisense-logo.png'); // kept as-is
-const green = '#2e7d32';
-
-export default function ConnectInstructions() {
+export default function ConnectInstructionsScreen() {
   const router = useRouter();
-  const { farmerId } = useLocalSearchParams<{ farmerId?: string }>();
-  const [busy, setBusy] = useState(false);
+  const params = useLocalSearchParams();
+  const farmerId = (params.farmerId as string) || '';
+  const farmerName = (params.farmerName as string) || 'No Farmer Selected';
 
-  const onConnect = async () => {
-    try {
-      setBusy(true);
-      const ok = await connectToESP();
-      if (!ok) {
-        Alert.alert(
-          'Hindi makakonekta',
-          'Tiyaking nakakonekta sa Wi-Fi “ESP32-NPK” (password: fertisense), i-ON ang Location (Android), patayin muna ang mobile data, at subukan muli.'
-        );
-        return;
-      }
-
-      // ✅ routes unchanged
-      router.push({
-        pathname: '/select-options' as const,
-        params: { farmerId: String(farmerId ?? '') },
-      });
-    } finally {
-      setBusy(false);
+  const handleStartReading = () => {
+    if (!farmerId) {
+      router.replace('/admin/screens/select-options');
+      return;
     }
+    // ✅ FUNCTIONALITY RETAINED
+    router.replace({
+      pathname: '/admin/screens/select-options',
+      params: { farmerId, farmerName },
+    });
+  };
+
+  const handleCancel = () => {
+    router.replace('/admin/tabs/logs');
   };
 
   return (
-    <ScrollView contentContainerStyle={styles.container} style={{ backgroundColor: '#fff' }}>
-      {/* Floating Back */}
-      <TouchableOpacity style={styles.backBtn} onPress={() => router.back()}>
-        <Ionicons name="arrow-back" size={22} color="#333" />
-      </TouchableOpacity>
+    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+     
 
-      {/* Brand */}
-      <Image source={logo} style={styles.logo} resizeMode="contain" />
+      {/* Logo */}
+      <Image
+        source={require('../../../assets/images/fertisense-logo.png')}
+        style={styles.logo}
+        resizeMode="contain"
+      />
+
+      {/* Title */}
       <Text style={styles.title}>Connect to Device</Text>
-      <Text style={styles.date}>
-        {new Date().toLocaleDateString('en-PH', { year: 'numeric', month: 'long', day: 'numeric' })}
-      </Text>
 
-      {/* Instructions Card */}
+      {/* Farmer chip (kept) */}
+      <View style={styles.farmerChip}>
+        <Ionicons name="person-circle" size={18} color="#2e7d32" />
+        <Text style={styles.farmerChipText}>Reading for: </Text>
+        <Text style={styles.farmerChipName}>{farmerName}</Text>
+      </View>
+
+      {/* Instruction card */}
       <View style={styles.card}>
-        <Text style={styles.cardIntro}>
+        <Text style={styles.lead}>
           Bago makita ang datos, ikonekta muna ang device sa iyong cellphone.
         </Text>
 
-        <View style={styles.stepRow}>
-          <Text style={styles.stepIcon}>⏻</Text>
-          <Text style={styles.stepText}>I-on ang iyong sensor device.</Text>
-        </View>
-
-        <View style={styles.stepRow}>
-          <Text style={styles.stepIcon}>📶</Text>
-          <Text style={styles.stepText}>
-            Buksan ang Wi-Fi at hanapin ang <Text style={styles.bold}>“ESP32-NPK”</Text>. Password:{' '}
-            <Text style={styles.bold}>fertisense</Text>
-          </Text>
-        </View>
-
-        <View style={styles.stepRow}>
-          <Text style={styles.stepIcon}>🔌</Text>
-          <Text style={styles.stepText}>
-            Pindutin ang <Text style={styles.bold}>‘Connect’</Text> upang makipag-ugnayan sa sensor.
-          </Text>
-        </View>
-
-        <View style={styles.stepRow}>
-          <Text style={styles.stepIcon}>🌾</Text>
-          <Text style={styles.stepText}>
-            Ilipat ang probe sa lupa ayon sa tagubilin sa susunod na screen.
-          </Text>
-        </View>
+        <InstructionRow icon="power" text="I-on ang iyong sensor device." />
+        <InstructionRow icon="wifi" text="Buksan ang Wi-Fi / Location ng iyong cellphone." />
+        <InstructionRow icon="swap-horizontal" text="Pindutin ang ‘Connect’ upang hanapin ang device." />
+        <InstructionRow icon="leaf" text="Ilagay ang sensor sa lupa para sa susunod na hakbang." />
+        <InstructionRow icon="checkmark-circle" text="Hintaying kumonekta o makita ang ‘Successful’ na status." />
       </View>
 
-      {/* CTA */}
-      <TouchableOpacity
-        style={[styles.cta, busy && { opacity: 0.9 }]}
-        onPress={onConnect}
-        disabled={busy}
-        activeOpacity={0.9}
-      >
-        {busy ? <ActivityIndicator color="#fff" /> : <Text style={styles.ctaText}>Connect</Text>}
+      {/* Connect button */}
+      <TouchableOpacity style={styles.cta} onPress={handleStartReading} activeOpacity={0.85}>
+        <Text style={styles.ctaText}>Connect</Text>
       </TouchableOpacity>
     </ScrollView>
   );
 }
 
+function InstructionRow({ icon, text }: { icon: keyof typeof Ionicons.glyphMap; text: string }) {
+  return (
+    <View style={rowStyles.row}>
+      <View style={rowStyles.bullet}>
+        <Ionicons name={icon} size={20} color="#2e7d32" />
+      </View>
+      <Text style={rowStyles.text}>{text}</Text>
+    </View>
+  );
+}
+
+const GREEN = '#2e7d32';
+
 const styles = StyleSheet.create({
-  container: {
-    padding: 24,
-    paddingBottom: 36,
-    alignItems: 'center',
-  },
-
-  backBtn: {
+  container: { flex: 1, backgroundColor: '#ffffff' },
+  content: { paddingHorizontal: 20, paddingTop: 50, paddingBottom: 40, alignItems: 'center' },
+  back: {
     position: 'absolute',
-    top: 18,
-    left: 18,
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: '#f3f3f3',
-    alignItems: 'center',
-    justifyContent: 'center',
-    elevation: 2,
+    top: 22,
+    left: 16,
     zIndex: 10,
+    backgroundColor: '#ffffff',
+    borderRadius: 20,
+    padding: 6,
+    elevation: 2,
   },
-
-  logo: {
-    width: 190,
-    height: 140,
-    marginTop: 12,
-    marginBottom: 4,
+  logo: { width: 200, height: 70, marginBottom: 6 },
+  title: { fontSize: 20, fontWeight: '700', color: GREEN, marginBottom: 16 },
+  farmerChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: '#eef7ef',
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#a5d6a7',
+    marginBottom: 16,
   },
-
-  title: {
-    fontSize: 20,
-    fontWeight: '800',
-    color: green,
-    marginBottom: 2,
-    letterSpacing: 0.2,
-  },
-
-  date: {
-    fontSize: 12.5,
-    color: '#6d6d6d',
-    marginBottom: 14,
-  },
+  farmerChipText: { fontSize: 12, color: '#455a64' },
+  farmerChipName: { fontSize: 13, fontWeight: '700', color: '#1b5e20' },
 
   card: {
     width: '100%',
-    borderWidth: 1,
-    borderColor: '#cfe9d2',
-    backgroundColor: '#f6fbf7',
-    borderRadius: 14,
-    padding: 16,
-    marginTop: 6,
-    marginBottom: 20,
+    backgroundColor: '#f7fbf7',
+    borderRadius: 18,
+    borderWidth: 2,
+    borderColor: GREEN,
+    padding: 18,
+    marginBottom: 28,
   },
-
-  cardIntro: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: '#333',
+  lead: {
+    fontSize: 14,
+    color: '#2b2b2b',
+    lineHeight: 20,
+    marginBottom: 14,
     textAlign: 'center',
-    marginBottom: 16,
   },
-
-  stepRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 10,
-    marginBottom: 12,
-  },
-
-  stepIcon: {
-    width: 26,
-    textAlign: 'center',
-    fontSize: 18,
-  },
-
-  stepText: {
-    flex: 1,
-    fontSize: 15,
-    color: '#434343',
-    lineHeight: 21,
-  },
-
-  bold: { fontWeight: '800' },
 
   cta: {
-    backgroundColor: green,
-    paddingVertical: 13,
-    paddingHorizontal: 100,
+    width: '90%',
+    backgroundColor: GREEN,
     borderRadius: 999,
-    alignSelf: 'center',
-    elevation: 0,
+    paddingVertical: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 4,
   },
+  ctaText: { color: '#ffffff', fontSize: 16, fontWeight: '700', letterSpacing: 0.2 },
+});
 
-  ctaText: {
-    color: '#fff',
-    fontWeight: '800',
-    fontSize: 15.5,
-    letterSpacing: 0.2,
+const rowStyles = StyleSheet.create({
+  row: { flexDirection: 'row', alignItems: 'center', marginBottom: 14 },
+  bullet: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#e8f2e8',
+    marginRight: 10,
   },
+  text: { flex: 1, fontSize: 14, color: '#333', lineHeight: 20 },
 });
