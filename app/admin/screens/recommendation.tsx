@@ -1,4 +1,5 @@
-// app/(stakeholder)/screens/recommendation.tsx
+// app/admin/screens/recommendation.tsx (ADMIN VERSION)
+
 import React from 'react';
 import {
   View,
@@ -9,8 +10,7 @@ import {
   Alert,
   StyleSheet,
 } from 'react-native';
-import { useRouter } from 'expo-router';
-import { useFocusEffect } from '@react-navigation/native';
+import { useRouter, useLocalSearchParams } from 'expo-router';
 import NetInfo from '@react-native-community/netinfo';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
@@ -22,6 +22,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth } from '../../../context/AuthContext';
 import { useFertilizer } from '../../../context/FertilizerContext';
 import { useReadingSession } from '../../../context/ReadingSessionContext';
+import { useData } from '../../../context/DataContext';
 
 /* services */
 import {
@@ -47,7 +48,9 @@ const labelOf = (
 
 const isObjectId = (s?: string) => !!s && /^[a-f0-9]{24}$/i.test(s);
 
-/* Types for server plans */
+/* 🔁 SAME PREFIX THAT logs.tsx USES */
+const READINGS_CACHE_PREFIX = 'fertisense:readings:';
+
 type ServerPlanRow = {
   key: string;
   label: string;
@@ -63,6 +66,23 @@ type ServerPlan = {
   currency: string;
 };
 
+/* helper: append one reading to this farmer's log cache */
+async function appendReadingToFarmerCache(fid: string, reading: any) {
+  try {
+    const key = READINGS_CACHE_PREFIX + fid;
+    const raw = await AsyncStorage.getItem(key);
+    const parsed = raw ? JSON.parse(raw) : [];
+    const arr = Array.isArray(parsed) ? parsed : [];
+    const next = [reading, ...arr];
+    await AsyncStorage.setItem(key, JSON.stringify(next));
+  } catch (e) {
+    console.warn('[AdminRecommendation] failed to append reading to cache:', e);
+  }
+}
+
+const isNonEmpty = (v: any): v is string =>
+  typeof v === 'string' && v.trim().length > 0;
+
 export default function RecommendationScreen() {
   const router = useRouter();
   const { token, user } = useAuth();
@@ -72,15 +92,78 @@ export default function RecommendationScreen() {
     loading: pricesLoading,
     refetchPrices,
   } = useFertilizer();
+
+  // ✅ averaged result from ESP32 (set by AdminSensorReadingScreen)
+  const { latestSensorData } = useData();
+
+  // ✅ last reading session (stored in AsyncStorage)
   const { result: session } = useReadingSession();
 
-  /* ------- resolve live values from ReadingSession ------- */
-  const farmerId = session?.farmerId ?? ''; // optional
-  const farmerName = session?.farmerName ?? '';
-  const nValue = session?.n ?? 0;
-  const pValue = session?.p ?? 0;
-  const kValue = session?.k ?? 0;
-  const phValue = session?.ph ?? 6.5;
+  // ✅ params (can be farmerId + farmerName OR farmerId + name)
+  const params = useLocalSearchParams<{
+    farmerId?: string;
+    farmerName?: string;
+    name?: string;
+  }>();
+
+  const safeNum = (v: any, fallback = 0) =>
+    typeof v === 'number' && !Number.isNaN(v) ? v : fallback;
+
+  /* ------- resolve farmer identity (ID + name) ------- */
+
+  const farmerIdFromParams = isNonEmpty(params.farmerId)
+    ? params.farmerId.trim()
+    : undefined;
+
+  const farmerNameFromParams = isNonEmpty(params.farmerName)
+    ? params.farmerName.trim()
+    : isNonEmpty(params.name)
+    ? params.name.trim()
+    : undefined;
+
+  // 👇 MAIN SOURCE OF TRUTH:
+  //  1) latestSensorData  (just-read admin flow)
+  //  2) URL params        (farmerId + name / farmerName)
+  //  3) session           (old fallback)
+  const farmerId: string =
+    (latestSensorData?.farmerId as string | undefined) ||
+    farmerIdFromParams ||
+    (session?.farmerId as string | undefined) ||
+    '';
+
+  const farmerName: string =
+    (latestSensorData?.farmerName as string | undefined) ||
+    farmerNameFromParams ||
+    (session?.farmerName as string | undefined) ||
+    '';
+
+  // 🔍 debug trace – will show up in Metro logs
+  console.log('[AdminRecommendation] farmerId used:', farmerId);
+  console.log('[AdminRecommendation] from params:', farmerIdFromParams);
+  console.log(
+    '[AdminRecommendation] from latestSensorData:',
+    latestSensorData?.farmerId
+  );
+  console.log('[AdminRecommendation] from session:', session?.farmerId);
+
+  // Prefer averaged values from latestSensorData; fallback to session values
+  const nValue = safeNum(
+    (latestSensorData as any)?.n ?? (session as any)?.n,
+    0
+  );
+  const pValue = safeNum(
+    (latestSensorData as any)?.p ?? (session as any)?.p,
+    0
+  );
+  const kValue = safeNum(
+    (latestSensorData as any)?.k ?? (session as any)?.k,
+    0
+  );
+  const phValue = safeNum(
+    (latestSensorData as any)?.ph ?? (session as any)?.ph,
+    6.5
+  );
+
   const phStatus =
     phValue < 5.5 ? 'Acidic' : phValue > 7.5 ? 'Alkaline' : 'Neutral';
 
@@ -170,7 +253,7 @@ export default function RecommendationScreen() {
         month: 'long',
         day: 'numeric',
       });
-      const phStr = `${phValue.toFixed(1)} (${phStatus})`;
+      const phStr = `${phValue.toFixed(2)} (${phStatus})`;
 
       const historyPlans = clientPlans.map(({ items, total }, idx) => {
         const details = Object.entries(items).map(([code, kg]) => {
@@ -198,6 +281,8 @@ export default function RecommendationScreen() {
         recommendationText,
         englishText,
         fertilizerPlans: historyPlans,
+        farmerId: farmerId || null,
+        farmerName: farmerName || null,
       };
 
       const raw = await AsyncStorage.getItem(userKey);
@@ -218,12 +303,16 @@ export default function RecommendationScreen() {
     phStatus,
     recommendationText,
     englishText,
+    farmerId,
+    farmerName,
   ]);
 
   const saveAndFetch = React.useCallback(async () => {
     if (postStatus !== 'pending' || isFetchingRef.current) return;
     isFetchingRef.current = true;
     setPostStatus('saving');
+
+    const createdAtIso = new Date().toISOString();
 
     try {
       const net = await NetInfo.fetch();
@@ -239,7 +328,7 @@ export default function RecommendationScreen() {
       } else if (!token) {
         console.warn('Missing token: skipping cloud save.');
       } else {
-        // ✅ If we have a valid farmerId, use farmer-based logging (admin-style)
+        // ✅ ADMIN path: save reading with farmerId so logs can group by farmer
         if (farmerId && isObjectId(farmerId)) {
           await addReading(
             {
@@ -253,7 +342,7 @@ export default function RecommendationScreen() {
             token
           );
         } else {
-          // ✅ Normal STAKEHOLDER path: standalone /api/readings (no farmerId)
+          // fallback (rare in admin flow / offline local farmer)
           await addStandaloneReading(
             {
               N: nValue,
@@ -266,38 +355,70 @@ export default function RecommendationScreen() {
           );
         }
 
-        // optional: fetch server (LGU) plans
-       // optional: fetch server (LGU) plans
-try {
-  const rec = await getRecommendation(token, {
-    n: nValue,
-    p: pValue,
-    k: kValue,
-    ph: phValue,
-    areaHa: 1,
-    // you can add these later if backend supports them:
-    // riceType: 'HYBRID',
-    // season: 'WET',
-    // soilType: 'LIGHT',
-  });
+        try {
+          const rec = await getRecommendation(token, {
+            n: nValue,
+            p: pValue,
+            k: kValue,
+            ph: phValue,
+            areaHa: 1,
+          });
 
-  if (Array.isArray(rec?.plans)) {
-    setServerPlans(rec.plans as ServerPlan[]);
-  }
-  if (rec?.narrative) {
-    setServerNarrative(rec.narrative as { en?: string; tl?: string });
-  }
-} catch (e) {
-  console.warn('[recommendation] fetch warn:', e);
-}
-
+          if (Array.isArray(rec?.plans)) {
+            setServerPlans(rec.plans as ServerPlan[]);
+          }
+          if (rec?.narrative) {
+            setServerNarrative(rec.narrative as { en?: string; tl?: string });
+          }
+        } catch (e) {
+          console.warn('[recommendation] fetch warn:', e);
+        }
       }
 
+      // ✅ also write to per-farmer log cache used by logs.tsx
+      if (farmerId) {
+        const mappedForLogs = {
+          farmerId,
+          createdAt: createdAtIso,
+          npk: {
+            N: Number(nValue ?? 0),
+            P: Number(pValue ?? 0),
+            K: Number(kValue ?? 0),
+          },
+          ph: Number.isFinite(phValue) ? phValue : null,
+          ec: null,
+          moisture: null,
+          temp: null,
+        };
+        await appendReadingToFarmerCache(farmerId, mappedForLogs);
+      }
+
+      // optional: keep your per-user history
       await persistLocalHistory();
+
       setPostStatus('saved');
     } catch (e: any) {
       console.error('save error:', e?.message || e);
       await persistLocalHistory();
+
+      // still try to push to farmer cache offline if we know farmerId
+      if (farmerId) {
+        const mappedForLogs = {
+          farmerId,
+          createdAt: createdAtIso,
+          npk: {
+            N: Number(nValue ?? 0),
+            P: Number(pValue ?? 0),
+            K: Number(kValue ?? 0),
+          },
+          ph: Number.isFinite(phValue) ? phValue : null,
+          ec: null,
+          moisture: null,
+          temp: null,
+        };
+        await appendReadingToFarmerCache(farmerId, mappedForLogs);
+      }
+
       setPostStatus('failed');
       Alert.alert('Save Error', e?.message || 'Could not save reading.');
     } finally {
@@ -314,17 +435,36 @@ try {
     persistLocalHistory,
   ]);
 
-  useFocusEffect(
-    React.useCallback(() => {
-      if (!onceRef.current) {
-        onceRef.current = true;
-        refetchPrices?.();
-        saveAndFetch();
-      }
-    }, [refetchPrices, saveAndFetch])
-  );
+  // 🔴 IMPORTANT:
+  // Wait until we ACTUALLY have N/P/K/pH before saving the first time.
+  React.useEffect(() => {
+    if (onceRef.current) return;
 
-  /* ------- PDF (guarded) ------- */
+    const hasFromSensor =
+      latestSensorData &&
+      (typeof (latestSensorData as any).n === 'number' ||
+        typeof (latestSensorData as any).p === 'number' ||
+        typeof (latestSensorData as any).k === 'number' ||
+        typeof (latestSensorData as any).ph === 'number');
+
+    const hasFromSession =
+      session &&
+      (typeof (session as any).n === 'number' ||
+        typeof (session as any).p === 'number' ||
+        typeof (session as any).k === 'number' ||
+        typeof (session as any).ph === 'number');
+
+    if (!hasFromSensor && !hasFromSession) {
+      // still empty, don't save yet
+      return;
+    }
+
+    onceRef.current = true;
+    refetchPrices?.();
+    saveAndFetch();
+  }, [latestSensorData, session, refetchPrices, saveAndFetch]);
+
+  /* ------- PDF (unchanged except farmerId now correct) ------- */
   const [pdfBusy, setPdfBusy] = React.useState(false);
 
   const handleSavePDF = React.useCallback(async () => {
@@ -333,7 +473,7 @@ try {
 
     const today = new Date();
     const ymd = today.toISOString().slice(0, 10);
-    const filename = `STAKEHOLDER_READING_${ymd.replace(/-/g, '')}.pdf`;
+    const filename = `ADMIN_READING_${ymd.replace(/-/g, '')}.pdf`;
 
     const money = (v: number) =>
       (v || 0).toLocaleString('en-PH', {
@@ -419,13 +559,13 @@ try {
           </style>
         </head>
         <body>
-          <h1>🌱 Fertilizer Report</h1>
+          <h1>🌱 Fertilizer Report (Admin)</h1>
           <p><b>📅 Date:</b> ${ymd}</p>
-          <p><b>👤 Farmer:</b> ${farmerName || '(stakeholder account)'}</p>
+          <p><b>👤 Farmer:</b> ${farmerName || '(unknown)'} (${farmerId || 'no-id'})</p>
 
           <h3>📟 Reading Results</h3>
           <div class="box">
-            <p><b>pH:</b> ${phValue.toFixed(1)} (${phStatus})</p>
+            <p><b>pH:</b> ${phValue.toFixed(2)} (${phStatus})</p>
             <p><b>N:</b> ${nValue} &nbsp; <b>P:</b> ${pValue} &nbsp; <b>K:</b> ${kValue}</p>
           </div>
 
@@ -444,7 +584,7 @@ try {
               : ''
           }
 
-          <div class="footer">Report • ${today.getFullYear()}</div>
+          <div class="footer">Admin Report • ${today.getFullYear()}</div>
         </body>
       </html>
     `;
@@ -475,6 +615,7 @@ try {
     serverPlans,
     currency,
     farmerName,
+    farmerId,
     nValue,
     pValue,
     kValue,
@@ -497,8 +638,7 @@ try {
       <View style={styles.readBox}>
         <Text style={styles.readTitle}>📟 Reading Results</Text>
         <Text style={styles.readLine}>
-          <Text style={styles.bold}>pH:</Text> {phValue.toFixed(1)} (
-          {phStatus})
+          <Text style={styles.bold}>pH:</Text> {phValue.toFixed(2)} ({phStatus})
         </Text>
         <Text style={styles.readLine}>
           <Text style={styles.bold}>N:</Text> {nValue}{'  '}
@@ -506,7 +646,12 @@ try {
           <Text style={styles.bold}>K:</Text> {kValue}
         </Text>
         {!!farmerName && (
-          <Text style={styles.readSubtle}>Farmer: {farmerName}</Text>
+          <Text style={styles.readSubtle}>
+            Farmer: {farmerName}{' '}
+            <Text style={{ fontSize: 11, color: '#999' }}>
+              (ID: {farmerId || 'none'})
+            </Text>
+          </Text>
         )}
       </View>
 
@@ -660,7 +805,7 @@ try {
 
       <TouchableOpacity
         style={styles.button}
-        onPress={() => router.replace('/(stakeholder)/tabs/stakeholder-home')}
+        onPress={() => router.replace('/admin/tabs/admin-home')}
       >
         <Text style={styles.buttonText}>Back to Home Screen</Text>
       </TouchableOpacity>
@@ -684,7 +829,12 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     marginBottom: 14,
   },
-  readTitle: { fontSize: 16, fontWeight: 'bold', color: '#2e7d32', marginBottom: 6 },
+  readTitle: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#2e7d32',
+    marginBottom: 6,
+  },
   readLine: { fontSize: 14, color: '#222', marginBottom: 2 },
   readSubtle: { fontSize: 12, color: '#666', marginTop: 4 },
   bold: { fontWeight: 'bold' },
@@ -706,8 +856,18 @@ const styles = StyleSheet.create({
   recommendationText: { fontSize: 14, marginBottom: 8, color: '#222' },
   englishText: { fontSize: 13, color: '#555', fontStyle: 'italic' },
 
-  divider: { height: 1, backgroundColor: '#000', marginVertical: 20, borderRadius: 8 },
-  sectionTitle: { fontSize: 18, fontWeight: 'bold', textAlign: 'center', marginBottom: 12 },
+  divider: {
+    height: 1,
+    backgroundColor: '#000',
+    marginVertical: 20,
+    borderRadius: 8,
+  },
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    textAlign: 'center',
+    marginBottom: 12,
+  },
 
   table: {
     marginBottom: 20,

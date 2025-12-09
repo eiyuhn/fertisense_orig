@@ -4,10 +4,8 @@ export default ({ config }) => {
   const isProd = profile === "production";
 
   return {
-    // keep whatever Expo already puts in config
     ...config,
 
-    // basic app info
     name: isProd ? "FertiSense" : "FertiSense Dev",
     slug: "fertisense",
     scheme: "fertisense",
@@ -15,25 +13,35 @@ export default ({ config }) => {
     orientation: "portrait",
     icon: "./assets/images/fertisense-logo.png",
 
-    // ✅ ONLY expo-build-properties here for now
     plugins: [
       [
         "expo-build-properties",
         {
           android: {
             minSdkVersion: 24,
+            // allow HTTP to ESP32 (192.168.4.1)
+            usesCleartextTraffic: true,
           },
         },
       ],
     ],
 
-    
-
     android: {
-      // prod vs dev package so you can have 2 apps installed
       package: isProd
-        ? "com.iannnn.fertisense"      // production
-        : "com.iannnn.fertisense.dev", // dev
+        ? "com.iannnn.fertisense"
+        : "com.iannnn.fertisense.dev",
+
+      // REQUIRED PERMISSIONS FOR WIFI + NETWORK
+      permissions: [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_WIFI_STATE",
+        "CHANGE_WIFI_STATE",
+        "ACCESS_NETWORK_STATE",
+        "INTERNET",
+        // 🔴 IMPORTANT FOR ANDROID 13+ WIFI SCAN/CONNECT:
+        "NEARBY_WIFI_DEVICES"
+      ],
     },
 
     ios: {
@@ -42,10 +50,12 @@ export default ({ config }) => {
         : "com.iannnn.fertisense.dev",
       infoPlist: {
         ITSAppUsesNonExemptEncryption: false,
+        // If you want HTTP to ESP32 on iOS too, you can add:
+        // NSAppTransportSecurity: {
+        //   NSAllowsArbitraryLoads: true,
+        // },
       },
     },
-
-    
 
     extra: {
       eas: {

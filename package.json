@@ -61,7 +61,8 @@
     "react-native-wifi-reborn": "^4.13.6",
     "react-native-worklets": "0.5.1",
     "react-native-worklets-core": "^1.6.2",
-    "realm": "^20.2.0"
+    "realm": "^20.2.0",
+    "twilio": "^5.10.6"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",

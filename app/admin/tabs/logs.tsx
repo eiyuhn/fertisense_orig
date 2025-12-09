@@ -39,10 +39,18 @@ type Farmer = {
 type Reading = {
   _id?: string;
   id?: string;
-  farmerId: string;
-  createdAt: string;
+  farmerId?: string;
+  createdAt?: string;
+  // backend may send either npk.N or top-level N,P,K or lower n,p,k
   npk?: { N?: number; P?: number; K?: number };
+  N?: number;
+  P?: number;
+  K?: number;
+  n?: number;
+  p?: number;
+  k?: number;
   ph?: number | null;
+  pH?: number | null;
   ec?: number | null;
   moisture?: number | null;
   temp?: number | null;
@@ -60,6 +68,7 @@ const READINGS_CACHE_PREFIX = 'fertisense:readings:'; // + farmerId
 const getFarmerId = (f: Farmer) => f._id || f.id || '';
 const getReadingId = (r: Reading) => r._id || r.id || '';
 
+// ---------- AsyncStorage helpers ----------
 async function getFarmersCache(): Promise<Farmer[]> {
   try {
     const raw = await AsyncStorage.getItem(FARMERS_CACHE_KEY);
@@ -70,11 +79,13 @@ async function getFarmersCache(): Promise<Farmer[]> {
     return [];
   }
 }
+
 async function setFarmersCache(farmers: Farmer[]): Promise<void> {
   try {
     await AsyncStorage.setItem(FARMERS_CACHE_KEY, JSON.stringify(farmers));
   } catch {}
 }
+
 async function getReadingsCache(fid: string): Promise<Reading[]> {
   try {
     const raw = await AsyncStorage.getItem(READINGS_CACHE_PREFIX + fid);
@@ -85,11 +96,13 @@ async function getReadingsCache(fid: string): Promise<Reading[]> {
     return [];
   }
 }
+
 async function setReadingsCache(fid: string, readings: Reading[]): Promise<void> {
   try {
     await AsyncStorage.setItem(READINGS_CACHE_PREFIX + fid, JSON.stringify(readings));
   } catch {}
 }
+
 async function removeFarmerFromCache(fid: string): Promise<void> {
   try {
     const list = await getFarmersCache();
@@ -98,26 +111,27 @@ async function removeFarmerFromCache(fid: string): Promise<void> {
     await AsyncStorage.removeItem(READINGS_CACHE_PREFIX + fid);
   } catch {}
 }
-async function removeLatestReadingFromCache(fid: string): Promise<void> {
-  try {
-    const list = await getReadingsCache(fid);
-    if (!list.length) return;
-    list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-    list.shift();
-    await setReadingsCache(fid, list);
-  } catch {}
-}
+
+// helper to pull numbers from several possible fields
+const pickReadingN = (r?: Reading | null) => r?.npk?.N ?? r?.N ?? r?.n;
+const pickReadingP = (r?: Reading | null) => r?.npk?.P ?? r?.P ?? r?.p;
+const pickReadingK = (r?: Reading | null) => r?.npk?.K ?? r?.K ?? r?.k;
+const pickReadingPh = (r?: Reading | null) => r?.ph ?? r?.pH ?? null;
 
 export default function LogsScreen() {
   const router = useRouter();
 
   const [farmers, setFarmers] = useState<Farmer[]>([]);
   const [latest, setLatest] = useState<Record<string, Reading | null>>({});
+  const [readingsByFarmer, setReadingsByFarmer] = useState<
+    Record<string, Reading[]>
+  >({});
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [refreshing, setRefreshing] = useState(false);
   const [isOnline, setIsOnline] = useState<boolean | null>(null);
   const [sortAsc, setSortAsc] = useState(true);
 
+  // ---- Network status ----
   useEffect(() => {
     const sub = NetInfo.addEventListener((state) => {
       const online = !!state.isConnected && !!state.isInternetReachable;
@@ -130,47 +144,86 @@ export default function LogsScreen() {
     return () => sub && sub();
   }, []);
 
+  // ---- Load farmers + readings (local first, then server) ----
   const loadFarmersAndLatest = useCallback(async () => {
     setRefreshing(true);
     try {
-      // local first
+      // 1) LOCAL FIRST
       const fsLocal = await getFarmersCache();
       if (fsLocal.length) setFarmers(fsLocal);
 
       const localLatestMap: Record<string, Reading | null> = {};
+      const localAllMap: Record<string, Reading[]> = {};
+
       for (const f of fsLocal) {
         const fid = getFarmerId(f);
         const rsLocal = await getReadingsCache(fid);
-        rsLocal.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        rsLocal.sort(
+          (a, b) =>
+            new Date(b.createdAt ?? b.updatedAt ?? 0).getTime() -
+            new Date(a.createdAt ?? a.updatedAt ?? 0).getTime()
+        );
+        localAllMap[fid] = rsLocal;
         localLatestMap[fid] = rsLocal[0] ?? null;
+      }
+      if (Object.keys(localAllMap).length) {
+        setReadingsByFarmer((prev) => ({ ...prev, ...localAllMap }));
       }
       if (Object.keys(localLatestMap).length) {
         setLatest((prev) => ({ ...prev, ...localLatestMap }));
       }
 
-      // online refresh
+      // 2) ONLINE REFRESH
       if (isOnline) {
         const fs = await listFarmersApi();
         setFarmers(fs);
         await setFarmersCache(fs);
 
         const onlineLatestMap: Record<string, Reading | null> = {};
+        const onlineAllMap: Record<string, Reading[]> = {};
+
         for (const f of fs) {
           const fid = getFarmerId(f);
+
           try {
             let rs = await listReadingsApi(fid);
             if (!Array.isArray(rs)) rs = [];
-            rs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-            onlineLatestMap[fid] = rs[0] ?? null;
-            await setReadingsCache(fid, rs);
+
+            if (rs.length === 0) {
+              // no readings in backend → keep whatever we had locally
+              const rsLocal = await getReadingsCache(fid);
+              rsLocal.sort(
+                (a, b) =>
+                  new Date(b.createdAt ?? b.updatedAt ?? 0).getTime() -
+                  new Date(a.createdAt ?? a.updatedAt ?? 0).getTime()
+              );
+              onlineAllMap[fid] = rsLocal;
+              onlineLatestMap[fid] = rsLocal[0] ?? null;
+              await setReadingsCache(fid, rsLocal);
+            } else {
+              rs.sort(
+                (a, b) =>
+                  new Date(b.createdAt ?? b.updatedAt ?? 0).getTime() -
+                  new Date(a.createdAt ?? a.updatedAt ?? 0).getTime()
+              );
+              onlineAllMap[fid] = rs;
+              onlineLatestMap[fid] = rs[0] ?? null;
+              await setReadingsCache(fid, rs);
+            }
           } catch {
+            // network error → fall back to local
             const rsLocal = await getReadingsCache(fid);
             rsLocal.sort(
-              (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+              (a, b) =>
+                new Date(b.createdAt ?? b.updatedAt ?? 0).getTime() -
+                new Date(a.createdAt ?? a.updatedAt ?? 0).getTime()
             );
+            onlineAllMap[fid] = rsLocal;
             onlineLatestMap[fid] = rsLocal[0] ?? null;
           }
         }
+
+        setReadingsByFarmer((prev) => ({ ...prev, ...onlineAllMap }));
         setLatest(onlineLatestMap);
       }
     } finally {
@@ -188,7 +241,8 @@ export default function LogsScreen() {
     }, [loadFarmersAndLatest])
   );
 
-  const toggleExpand = (id: string) => setExpanded((s) => ({ ...s, [id]: !s[id] }));
+  const toggleExpand = (id: string) =>
+    setExpanded((s) => ({ ...s, [id]: !s[id] }));
 
   const onConnect = (f: Farmer) => {
     const fid = getFarmerId(f);
@@ -220,6 +274,11 @@ export default function LogsScreen() {
             delete copy[fid];
             return copy;
           });
+          setReadingsByFarmer((prev) => {
+            const copy = { ...prev };
+            delete copy[fid];
+            return copy;
+          });
           await removeFarmerFromCache(fid);
 
           if (isOnline) {
@@ -229,11 +288,16 @@ export default function LogsScreen() {
             } catch (e: any) {
               Alert.alert(
                 'Error',
-                e?.response?.data?.error ?? e?.message ?? 'Failed to delete farmer online.'
+                e?.response?.data?.error ??
+                  e?.message ??
+                  'Failed to delete farmer online.'
               );
             }
           } else {
-            Alert.alert('Offline', 'Removed locally. It will remain removed in this device cache.');
+            Alert.alert(
+              'Offline',
+              'Removed locally. It will remain removed in this device cache.'
+            );
           }
         },
       },
@@ -242,9 +306,9 @@ export default function LogsScreen() {
 
   const onDeleteLatestReading = async (f: Farmer) => {
     const fid = getFarmerId(f);
-    const r = latest[fid];
-    if (!r) return;
-    const rid = getReadingId(r);
+    const currentLatest = latest[fid];
+    if (!currentLatest) return;
+    const rid = getReadingId(currentLatest);
 
     Alert.alert('Delete Reading', 'Delete the latest reading for this farmer?', [
       { text: 'Cancel', style: 'cancel' },
@@ -252,30 +316,65 @@ export default function LogsScreen() {
         text: 'Delete',
         style: 'destructive',
         onPress: async () => {
-          setLatest((prev) => ({ ...prev, [fid]: null }));
-          await removeLatestReadingFromCache(fid);
+          // 1️⃣ Update front-end state + cache immediately
+          setReadingsByFarmer((prev) => {
+            const list = prev[fid] || [];
+            const filtered = list.filter(
+              (r) => getReadingId(r) !== rid
+            );
+            // update latest based on filtered
+            setLatest((old) => ({
+              ...old,
+              [fid]: filtered[0] ?? null,
+            }));
+            // persist filtered list to AsyncStorage
+            setReadingsCache(fid, filtered);
+            return { ...prev, [fid]: filtered };
+          });
 
-          if (isOnline) {
-            try {
-              await deleteReadingApi(fid, rid);
-              try {
-                let rs = await listReadingsApi(fid);
-                if (!Array.isArray(rs)) rs = [];
-                rs.sort(
-                  (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-                );
-                await setReadingsCache(fid, rs);
-                setLatest((prev) => ({ ...prev, [fid]: rs[0] ?? null }));
-              } catch {}
-              Alert.alert('Deleted', 'Latest reading removed.');
-            } catch (e: any) {
-              Alert.alert(
-                'Error',
-                e?.response?.data?.error ?? e?.message ?? 'Failed to delete reading online.'
-              );
+          // 2️⃣ If offline, stop here
+          if (!isOnline || !rid) {
+            if (!isOnline) {
+              Alert.alert('Offline', 'Removed from local cache.');
             }
-          } else {
-            Alert.alert('Offline', 'Removed from local cache.');
+            return;
+          }
+
+          // 3️⃣ Try deleting on backend + re-sync from server
+          try {
+            await deleteReadingApi(fid, rid);
+
+            try {
+              let rs = await listReadingsApi(fid);
+              if (!Array.isArray(rs)) rs = [];
+
+              rs.sort(
+                (a, b) =>
+                  new Date(b.createdAt ?? b.updatedAt ?? 0).getTime() -
+                  new Date(a.createdAt ?? a.updatedAt ?? 0).getTime()
+              );
+
+              setReadingsByFarmer((prev) => ({
+                ...prev,
+                [fid]: rs,
+              }));
+              setLatest((prev) => ({
+                ...prev,
+                [fid]: rs[0] ?? null,
+              }));
+              await setReadingsCache(fid, rs);
+            } catch {
+              // ignore re-sync errors; front-end state is already consistent
+            }
+
+            Alert.alert('Deleted', 'Latest reading removed.');
+          } catch (e: any) {
+            Alert.alert(
+              'Error',
+              e?.response?.data?.error ??
+                e?.message ??
+                'Failed to delete reading online.'
+            );
           }
         },
       },
@@ -312,8 +411,15 @@ export default function LogsScreen() {
     <View style={styles.listHeaderWrap}>
       <HeaderBar />
       <View style={styles.onlineRow}>
-        <View style={[styles.onlineDot, { backgroundColor: isOnline ? '#6ecf78' : '#ff6b6b' }]} />
-        <Text style={styles.onlineText}>{isOnline ? 'Online' : 'Offline cache'}</Text>
+        <View
+          style={[
+            styles.onlineDot,
+            { backgroundColor: isOnline ? '#6ecf78' : '#ff6b6b' },
+          ]}
+        />
+        <Text style={styles.onlineText}>
+          {isOnline ? 'Online' : 'Offline cache'}
+        </Text>
       </View>
     </View>
   );
@@ -322,6 +428,15 @@ export default function LogsScreen() {
     const fid = getFarmerId(f);
     const r = latest[fid];
     const open = !!expanded[fid];
+
+    const allForFarmer = readingsByFarmer[fid] || [];
+    const totalCount = allForFarmer.length;
+
+    // normalized values for display
+    const phVal = pickReadingPh(r);
+    const nVal = pickReadingN(r);
+    const pVal = pickReadingP(r);
+    const kVal = pickReadingK(r);
 
     return (
       <View style={styles.card}>
@@ -339,7 +454,10 @@ export default function LogsScreen() {
               <Ionicons name="pencil" size={18} color={GREEN} />
             </TouchableOpacity>
 
-            <TouchableOpacity onPress={() => onDeleteFarmer(f)} style={styles.iconTap}>
+            <TouchableOpacity
+              onPress={() => onDeleteFarmer(f)}
+              style={styles.iconTap}
+            >
               <Ionicons name="trash" size={18} color="#d32f2f" />
             </TouchableOpacity>
           </View>
@@ -371,7 +489,11 @@ export default function LogsScreen() {
 
         {/* Tingnan Pa row */}
         <TouchableOpacity onPress={() => toggleExpand(fid)} style={styles.moreRow}>
-          <Ionicons name={open ? 'chevron-down' : 'chevron-forward'} size={18} color={GREEN} />
+          <Ionicons
+            name={open ? 'chevron-down' : 'chevron-forward'}
+            size={18}
+            color={GREEN}
+          />
           <Text style={styles.moreText}>Tingnan Pa</Text>
         </TouchableOpacity>
 
@@ -380,20 +502,68 @@ export default function LogsScreen() {
           <View style={styles.expandedBox}>
             <Text style={styles.expTitle}>🧪 Huling Reading</Text>
             <Text style={styles.expRow}>
-              🗓 Petsa: {r?.createdAt ? new Date(r.createdAt).toLocaleDateString() : '—'}
+              🗓 Petsa:{' '}
+              {r?.createdAt
+                ? new Date(r.createdAt).toLocaleDateString()
+                : '—'}
             </Text>
-            <Text style={styles.expRow}>💧 pH: {fmt(r?.ph)}</Text>
-            <Text style={styles.expRow}>🌿 N: {fmt(r?.npk?.N)}</Text>
-            <Text style={styles.expRow}>🌱 P: {fmt(r?.npk?.P)}</Text>
-            <Text style={styles.expRow}>🥬 K: {fmt(r?.npk?.K)}</Text>
+            <Text style={styles.expRow}>💧 pH: {fmtPh(phVal)}</Text>
+            <Text style={styles.expRow}>🌿 N: {fmt(nVal)}</Text>
+            <Text style={styles.expRow}>🌱 P: {fmt(pVal)}</Text>
+            <Text style={styles.expRow}>🥬 K: {fmt(kVal)}</Text>
+
+            <Text style={[styles.expRow, { marginTop: 8, fontWeight: '700' }]}>
+              📊 Total readings: {totalCount}
+            </Text>
+
+            {/* 🔽 ALL readings list (latest first) */}
+            <View style={styles.allBox}>
+              <Text style={styles.allTitle}>All readings (latest first)</Text>
+              {totalCount === 0 && (
+                <Text style={styles.noReadingText}>
+                  Walang reading pa para sa farmer na ito.
+                </Text>
+              )}
+              {totalCount > 0 &&
+                allForFarmer.map((rr, idx) => (
+                  <View key={getReadingId(rr) || idx.toString()} style={styles.allRow}>
+                    <Text style={styles.allIndex}>
+                      #{idx + 1}{' '}
+                      {idx === 0 ? (
+                        <Text style={styles.latestTag}>(latest)</Text>
+                      ) : null}
+                    </Text>
+                    <Text style={styles.allDate}>
+                      🗓{' '}
+                      {rr.createdAt
+                        ? new Date(rr.createdAt).toLocaleDateString()
+                        : '—'}
+                    </Text>
+                    <Text style={styles.allLine}>
+                      N: {fmt(pickReadingN(rr))} | P: {fmt(pickReadingP(rr))} | K:{' '}
+                      {fmt(pickReadingK(rr))}
+                    </Text>
+                    <Text style={styles.allLine}>
+                      pH: {fmtPh(pickReadingPh(rr))}
+                    </Text>
+                  </View>
+                ))}
+            </View>
 
             <View style={styles.expActions}>
               {r ? (
-                <TouchableOpacity onPress={() => onDeleteLatestReading(f)} style={styles.deleteLatestBtn}>
+                <TouchableOpacity
+                  onPress={() => onDeleteLatestReading(f)}
+                  style={styles.deleteLatestBtn}
+                >
                   <Ionicons name="trash-outline" size={18} color="#d32f2f" />
                   <Text style={styles.deleteLatestText}>Delete latest</Text>
                 </TouchableOpacity>
-              ) : null}
+              ) : (
+                <Text style={styles.noReadingText}>
+                  Walang reading pa para sa farmer na ito.
+                </Text>
+              )}
             </View>
           </View>
         )}
@@ -406,7 +576,9 @@ export default function LogsScreen() {
   const empty = useMemo(
     () => (
       <View style={{ padding: 24, alignItems: 'center' }}>
-        <Text style={{ color: TEXT_MUTED }}>Wala pang farmers. Magdagdag mula sa Home.</Text>
+        <Text style={{ color: TEXT_MUTED }}>
+          Wala pang farmers. Magdagdag mula sa Home.
+        </Text>
       </View>
     ),
     []
@@ -424,7 +596,8 @@ export default function LogsScreen() {
         contentContainerStyle={{
           padding: 16,
           paddingBottom: 110,
-          paddingTop: 0 + (Platform.OS === 'android' ? (StatusBar.currentHeight || 0) : 0),
+          paddingTop:
+            0 + (Platform.OS === 'android' ? StatusBar.currentHeight || 0 : 0),
         }}
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={loadFarmersAndLatest} />
@@ -434,10 +607,18 @@ export default function LogsScreen() {
   );
 }
 
+// generic formatter (NPK etc.)
 function fmt(v: any) {
   if (v === null || v === undefined) return '0';
   const n = Number(v);
   return Number.isFinite(n) ? String(n) : '0';
+}
+
+// pH with two decimals, e.g. "5.40"
+function fmtPh(v: any) {
+  if (v === null || v === undefined) return '0.00';
+  const n = Number(v);
+  return Number.isFinite(n) ? n.toFixed(2) : '0.00';
 }
 
 const styles = StyleSheet.create({
@@ -534,11 +715,38 @@ const styles = StyleSheet.create({
   expTitle: { fontWeight: '800', color: GREEN, marginBottom: 6 },
   expRow: { color: '#1b5e20', marginTop: 2 },
 
+  allBox: {
+    marginTop: 10,
+    paddingTop: 6,
+    borderTopWidth: 1,
+    borderTopColor: '#cfd8dc',
+  },
+  allTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#2e7d32',
+    marginBottom: 4,
+  },
+  allRow: {
+    paddingVertical: 4,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e0e0e0',
+  },
+  allIndex: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#455a64',
+  },
+  latestTag: { color: '#2e7d32', fontSize: 11, fontWeight: '700' },
+  allDate: { fontSize: 12, color: '#607d8b' },
+  allLine: { fontSize: 12, color: '#2e7d32' },
+
   expActions: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
     marginTop: 10,
+    justifyContent: 'flex-end',
   },
   deleteLatestBtn: {
     flexDirection: 'row',
@@ -548,4 +756,10 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
   },
   deleteLatestText: { color: '#d32f2f', fontWeight: '600' },
+  noReadingText: {
+    fontSize: 12,
+    color: TEXT_MUTED,
+    fontStyle: 'italic',
+    marginTop: 2,
+  },
 });

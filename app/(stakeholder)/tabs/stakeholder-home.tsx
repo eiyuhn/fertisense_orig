@@ -15,8 +15,8 @@ import {
   View,
   Alert,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth } from '../../../context/AuthContext';
-import { useData } from '../../../context/DataContext';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { BASE_URL } from '../../../src/api';
 
@@ -34,52 +34,101 @@ const getFormattedDate = () => {
   return new Date().toLocaleDateString('en-PH', options);
 };
 
+type StakeholderReading = {
+  timestamp: string | number;
+  n: number;
+  p: number;
+  k: number;
+  ph?: number | null;
+};
+
 export default function StakeholderHome() {
   const router = useRouter();
   const navigation = useNavigation();
   const { user, logout } = useAuth();
-  const { latestSensorData } = useData();
 
   // Use backend field `photoUrl` and cache-bust when it changes
   const [profileImageUrl, setProfileImageUrl] = useState<string | null>(
-    user?.photoUrl || null
+    (user as any)?.photoUrl || null
   );
   const [imgKey, setImgKey] = useState<number>(Date.now());
 
+  // ❗New: keep the stakeholder's own last reading (from AsyncStorage)
+  const [lastReading, setLastReading] = useState<StakeholderReading | null>(null);
+
+  // Keep profile + logout behavior
   useFocusEffect(
     useCallback(() => {
-      const url = user?.photoUrl || null;
+      const url = (user as any)?.photoUrl || null;
       setProfileImageUrl(url);
       setImgKey(Date.now());
 
       // ✅ Only intercept hardware back (GO_BACK). Allow tab switches & pushes.
-      const unsubscribe = navigation.addListener('beforeRemove', (e: any) => {
-        if (e?.data?.action?.type !== 'GO_BACK') return; // let other actions proceed
-        if (!navigation.isFocused()) return;
+      const unsubscribe = (navigation as any).addListener(
+        'beforeRemove',
+        (e: any) => {
+          if (e?.data?.action?.type !== 'GO_BACK') return; // let other actions proceed
+          if (!(navigation as any).isFocused()) return;
 
-        e.preventDefault();
+          e.preventDefault();
 
-        Alert.alert(
-          'Confirm Logout',
-          'You must log out to leave the application. Do you want to log out now?',
-          [
-            { text: 'Cancel', style: 'cancel' },
-            {
-              text: 'Logout',
-              style: 'destructive',
-              onPress: async () => {
-                await logout();
-                router.replace('/login');
+          Alert.alert(
+            'Confirm Logout',
+            'You must log out to leave the application. Do you want to log out now?',
+            [
+              { text: 'Cancel', style: 'cancel' },
+              {
+                text: 'Logout',
+                style: 'destructive',
+                onPress: async () => {
+                  await logout();
+                  router.replace('/login');
+                },
               },
-            },
-          ]
-        );
-      });
+            ]
+          );
+        }
+      );
 
       return () => {
         unsubscribe();
       };
-    }, [user?.photoUrl, navigation, logout, router])
+    }, [user, navigation, logout, router])
+  );
+
+  // ❗New: on focus, load stakeholder's own last reading from AsyncStorage
+  useFocusEffect(
+    useCallback(() => {
+      let isActive = true;
+
+      const loadLastReading = async () => {
+        if (!user?._id) {
+          if (isActive) setLastReading(null);
+          return;
+        }
+        const key = `stakeholder:lastReading:${user._id}`;
+        try {
+          const raw = await AsyncStorage.getItem(key);
+          if (!raw) {
+            if (isActive) setLastReading(null);
+            return;
+          }
+          const parsed = JSON.parse(raw);
+          if (isActive && parsed && typeof parsed === 'object') {
+            setLastReading(parsed as StakeholderReading);
+          }
+        } catch (e) {
+          console.warn('[stakeholder-home] loadLastReading error:', e);
+          if (isActive) setLastReading(null);
+        }
+      };
+
+      loadLastReading();
+
+      return () => {
+        isActive = false;
+      };
+    }, [user?._id])
   );
 
   // Build absolute URL with cache-busting
@@ -137,16 +186,19 @@ export default function StakeholderHome() {
           iconColor="#2e7d32"
         />
 
+        {/* ⭐ Farm Insights now uses ONLY this stakeholder's own last reading */}
         <SectionLabel text="📊 Farm Insights" />
-        {latestSensorData ? (
+        {lastReading ? (
           <InfoCard
             color="#fce4ec"
             imageUri="https://cdn-icons-png.flaticon.com/512/2906/2906278.png"
             title={`Latest Reading: ${new Date(
-              latestSensorData.timestamp
+              lastReading.timestamp
             ).toLocaleString('en-PH')}`}
-            subtitle={`Nitrogen (N): ${latestSensorData.n} | Phosphorus (P): ${latestSensorData.p} | Potassium (K): ${latestSensorData.k}${
-              latestSensorData.ph !== undefined ? ` | pH: ${latestSensorData.ph}` : ''
+            subtitle={`N: ${lastReading.n} | P: ${lastReading.p} | K: ${lastReading.k}${
+              lastReading.ph !== undefined && lastReading.ph !== null
+                ? ` | pH: ${lastReading.ph}`
+                : ''
             }`}
           />
         ) : (
@@ -156,7 +208,9 @@ export default function StakeholderHome() {
             title="No sensor data yet"
             subtitle="Once you connect your sensor and get readings, insights will appear here."
             buttonLabel="📡 Connect Sensor"
-            onButtonPress={() => router.push('/(stakeholder)/tabs/connect-instructions')}
+            onButtonPress={() =>
+              router.push('/(stakeholder)/tabs/connect-instructions')
+            }
           />
         )}
 
@@ -264,7 +318,7 @@ const styles = StyleSheet.create({
   profileContainer: {
     width: 40,
     height: 40,
-    borderRadius: 20, // corrected to match width/height
+    borderRadius: 20,
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -298,7 +352,7 @@ const styles = StyleSheet.create({
   profileImage: {
     width: 40,
     height: 40,
-    borderRadius: 20, // match the container
+    borderRadius: 20,
     borderWidth: 3,
     borderColor: '#fff',
   },

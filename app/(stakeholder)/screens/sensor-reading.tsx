@@ -1,3 +1,4 @@
+// app/(stakeholder)/screens/sensor-reading.tsx
 import React, { useEffect, useCallback, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -11,10 +12,22 @@ import {
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 
-import { autoConnectToESP32, readNpkFromESP32, ESP_SSID } from '../../../src/esp32';
+import {
+  autoConnectToESP32,
+  readNpkFromESP32,
+  ESP_SSID,
+} from '../../../src/esp32';
 import { useData } from '../../../context/DataContext';
 import { useAuth } from '../../../context/AuthContext';
 import { useReadingSession } from '../../../context/ReadingSessionContext';
+import { addStandaloneReading } from '../../../src/services';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+type Levels = {
+  n?: 'LOW' | 'MEDIUM' | 'HIGH' | string;
+  p?: 'LOW' | 'MEDIUM' | 'HIGH' | string;
+  k?: 'LOW' | 'MEDIUM' | 'HIGH' | string;
+};
 
 type NpkJson = {
   ok?: boolean;
@@ -28,23 +41,42 @@ type NpkJson = {
   p_kg_ha?: number;
   k_kg_ha?: number;
   error?: string;
+  // NEW: levels block from ESP32 (if firmware is updated)
+  levels?: Levels;
 };
 
 const TOTAL_STEPS = 10;
 // 🔁 minimum time for each spot reading so spinner does a “full circle”
-const MIN_READING_DURATION_MS = 3000;
+const MIN_READING_DURATION_MS = 3500; // 3.5 seconds
+
+// 🔢 Local helper – same thresholds as ESP32 & recommendation screen
+// LOW:    0–117
+// MEDIUM: 118–235
+// HIGH:   236+
+const classifyLevel = (v?: number): 'LOW' | 'MEDIUM' | 'HIGH' | 'N/A' => {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return 'N/A';
+  if (v <= 117) return 'LOW';
+  if (v <= 235) return 'MEDIUM';
+  return 'HIGH';
+};
 
 export default function SensorReadingScreen() {
   const router = useRouter();
   const { farmerId } = useLocalSearchParams<{ farmerId?: string }>();
   const { setLatestSensorData } = useData();
-  const { token } = useAuth(); // reserved if needed later
+  const { token, user } = useAuth();
   const { setFromParams } = useReadingSession();
 
   const [currentStep, setCurrentStep] = useState(0);
   const [readings, setReadings] = useState<NpkJson[]>([]);
   const [isReadingStep, setIsReadingStep] = useState(false);
-  const [statusMessage, setStatusMessage] = useState<string>('Press Start to begin.');
+  const [statusMessage, setStatusMessage] = useState<string>(
+    'Press Start to begin.'
+  );
+
+  // 👇 per-spot display
+  const [spotResult, setSpotResult] = useState<NpkJson | null>(null);
+  const [spotIndex, setSpotIndex] = useState<number | null>(null);
 
   const abortRef = useRef<{ cancelled: boolean }>({ cancelled: false });
 
@@ -53,7 +85,10 @@ export default function SensorReadingScreen() {
     setReadings([]);
     setIsReadingStep(false);
     setStatusMessage('Press Start to begin.');
+    setSpotResult(null);
+    setSpotIndex(null);
     abortRef.current.cancelled = false;
+
     return () => {
       abortRef.current.cancelled = true;
     };
@@ -79,13 +114,25 @@ export default function SensorReadingScreen() {
       setCurrentStep(TOTAL_STEPS + 1);
       setStatusMessage('Calculating average...');
 
-      const Ns = allReadings.map((r) => r.n).filter((n) => typeof n === 'number') as number[];
-      const Ps = allReadings.map((r) => r.p).filter((n) => typeof n === 'number') as number[];
-      const Ks = allReadings.map((r) => r.k).filter((n) => typeof n === 'number') as number[];
-      const pHs = allReadings.map((r) => r.ph).filter((n) => typeof n === 'number') as number[];
+      const Ns = allReadings
+        .map((r) => r.n)
+        .filter((n) => typeof n === 'number') as number[];
+      const Ps = allReadings
+        .map((r) => r.p)
+        .filter((n) => typeof n === 'number') as number[];
+      const Ks = allReadings
+        .map((r) => r.k)
+        .filter((n) => typeof n === 'number') as number[];
+      const pHs = allReadings
+        .map((r) => r.ph)
+        .filter((n) => typeof n === 'number') as number[];
 
       const avg = (arr: number[]) =>
-        arr.length ? Math.round((arr.reduce((a, b) => a + b, 0) / arr.length) * 10) / 10 : 0;
+        arr.length
+          ? Math.round(
+              (arr.reduce((a, b) => a + b, 0) / arr.length) * 10
+            ) / 10
+          : 0;
 
       const avgN = avg(Ns);
       const avgP = avg(Ps);
@@ -93,20 +140,42 @@ export default function SensorReadingScreen() {
       const avgPHRaw = avg(pHs);
       const avgPH = Number.isFinite(avgPHRaw) ? avgPHRaw : NaN;
 
+      const tsNum = Date.now();
+
       const finalResult = {
         n: avgN,
         p: avgP,
         k: avgK,
         ph: Number.isFinite(avgPH) ? avgPH : undefined,
-        timestamp: String(Date.now()),
+        timestamp: String(tsNum),
         farmerId: String(farmerId ?? ''),
         readings: allReadings,
       };
 
-      // store in DataContext
+      // 1) store in DataContext (for any immediate views)
       setLatestSensorData(finalResult);
 
-      // also push into ReadingSessionContext (for recommendation screen)
+      // 2) store last reading for this stakeholder → used in Stakeholder Home insights
+      try {
+        if (user?._id) {
+          const key = `stakeholder:lastReading:${user._id}`;
+          const payload = {
+            timestamp: tsNum,
+            n: avgN,
+            p: avgP,
+            k: avgK,
+            ph: Number.isFinite(avgPH) ? avgPH : undefined,
+          };
+          await AsyncStorage.setItem(key, JSON.stringify(payload));
+        }
+      } catch (e) {
+        console.warn(
+          '[SensorReading] failed to cache stakeholder last reading:',
+          e
+        );
+      }
+
+      // 3) push into ReadingSessionContext (used by recommendation flows if needed)
       try {
         await setFromParams({
           n: avgN,
@@ -114,12 +183,34 @@ export default function SensorReadingScreen() {
           k: avgK,
           ph: Number.isFinite(avgPH) ? avgPH : undefined,
           farmerId: typeof farmerId === 'string' ? farmerId : undefined,
-          ts: Date.now(),
+          ts: tsNum,
         });
       } catch (e) {
         console.warn('[SensorReading] failed to set reading session:', e);
       }
 
+      // 4) Optional: send as standalone stakeholder reading to backend
+      try {
+        if (token) {
+          await addStandaloneReading(
+            {
+              N: avgN,
+              P: avgP,
+              K: avgK,
+              ph: Number.isFinite(avgPH) ? avgPH : undefined,
+              source: 'esp32',
+            },
+            token
+          );
+        }
+      } catch (e) {
+        console.warn(
+          '[SensorReading] failed to push standalone reading:',
+          e
+        );
+      }
+
+      // Small pause before navigation
       await new Promise((r) => setTimeout(r, 1000));
       if (abortRef.current.cancelled) return;
 
@@ -134,13 +225,25 @@ export default function SensorReadingScreen() {
         },
       });
     },
-    [farmerId, router, setFromParams, setLatestSensorData]
+    [
+      farmerId,
+      router,
+      setFromParams,
+      setLatestSensorData,
+      token,
+      user?._id,
+    ]
   );
 
   const handleReadNextStep = useCallback(
     async () => {
-      if (isReadingStep || currentStep > TOTAL_STEPS || currentStep === 0) return;
+      if (isReadingStep || currentStep > TOTAL_STEPS || currentStep === 0)
+        return;
       if (abortRef.current.cancelled) return;
+
+      // 🔄 clear previous spot result when starting a new spot
+      setSpotResult(null);
+      setSpotIndex(null);
 
       setIsReadingStep(true);
       const stepToRead = currentStep;
@@ -164,7 +267,9 @@ export default function SensorReadingScreen() {
       // 🔁 ensure spinner runs at least MIN_READING_DURATION_MS
       const elapsed = Date.now() - startTime;
       if (elapsed < MIN_READING_DURATION_MS) {
-        await new Promise((r) => setTimeout(r, MIN_READING_DURATION_MS - elapsed));
+        await new Promise((r) =>
+          setTimeout(r, MIN_READING_DURATION_MS - elapsed)
+        );
         if (abortRef.current.cancelled) {
           setIsReadingStep(false);
           return;
@@ -173,19 +278,31 @@ export default function SensorReadingScreen() {
 
       if (!data) {
         setIsReadingStep(false);
-        setStatusMessage(`Failed read ${stepToRead}. Press button to try again.`);
+        setStatusMessage(
+          `Failed read ${stepToRead}. Press button to try again.`
+        );
         Alert.alert(
           'Walang nabasang data',
           'Hindi nakakuha ng reading. Subukan ilapit ang phone at ulitin.'
         );
         return;
       }
-      if (typeof data.n !== 'number' || typeof data.p !== 'number' || typeof data.k !== 'number') {
+      if (
+        typeof data.n !== 'number' ||
+        typeof data.p !== 'number' ||
+        typeof data.k !== 'number'
+      ) {
         setIsReadingStep(false);
-        setStatusMessage(`Invalid data ${stepToRead}. Press button to try again.`);
+        setStatusMessage(
+          `Invalid data ${stepToRead}. Press button to try again.`
+        );
         Alert.alert('Invalid Data', `Incomplete NPK at spot ${stepToRead}.`);
         return;
       }
+
+      // ✅ show this spot's result under the status text
+      setSpotResult(data);
+      setSpotIndex(stepToRead);
 
       const newReadings = [...readings, data];
       setReadings(newReadings);
@@ -196,7 +313,9 @@ export default function SensorReadingScreen() {
         processResultsAndNavigate(newReadings);
       } else {
         setCurrentStep(nextStep);
-        setStatusMessage(`Read ${stepToRead}/${TOTAL_STEPS} OK. Press for spot ${nextStep}.`);
+        setStatusMessage(
+          `Read ${stepToRead}/${TOTAL_STEPS} OK. Press for spot ${nextStep}.`
+        );
         setIsReadingStep(false);
       }
     },
@@ -230,6 +349,26 @@ export default function SensorReadingScreen() {
       ? TOTAL_STEPS
       : currentStep;
 
+  // helper for nice display
+  const fmt = (v: any) => {
+    if (v === null || v === undefined) return '0';
+    const n = Number(v);
+    return Number.isFinite(n) ? String(n) : '0';
+  };
+  const fmtPh = (v: any) => {
+    if (v === null || v === undefined) return '0.00';
+    const n = Number(v);
+    return Number.isFinite(n) ? n.toFixed(2) : '0.00';
+  };
+
+  // 🔎 derive per-spot NPK levels for UI
+  const spotLevelN =
+    spotResult?.levels?.n ?? classifyLevel(spotResult?.n);
+  const spotLevelP =
+    spotResult?.levels?.p ?? classifyLevel(spotResult?.p);
+  const spotLevelK =
+    spotResult?.levels?.k ?? classifyLevel(spotResult?.k);
+
   return (
     <View style={styles.container}>
       <Image
@@ -250,9 +389,18 @@ export default function SensorReadingScreen() {
           <View style={styles.progressCircle}>
             <View style={styles.progressInner}>
               {isReadingStep ? (
-                <ActivityIndicator size="small" color="#2e7d32" style={styles.circleSpinner} />
+                <ActivityIndicator
+                  size="small"
+                  color="#2e7d32"
+                  style={styles.circleSpinner}
+                />
               ) : (
-                <Ionicons name="leaf-outline" size={24} color="#2e7d32" style={styles.circleSpinner} />
+                <Ionicons
+                  name="leaf-outline"
+                  size={24}
+                  color="#2e7d32"
+                  style={styles.circleSpinner}
+                />
               )}
               <Text style={styles.progressLabel}>Spot</Text>
               <Text style={styles.progressStep}>
@@ -262,6 +410,32 @@ export default function SensorReadingScreen() {
           </View>
 
           <Text style={styles.statusText}>{statusMessage}</Text>
+
+          {/* 👇 per-spot NPK + pH display */}
+          {spotResult && spotIndex !== null && (
+            <View style={styles.spotResultBox}>
+              <Text style={styles.spotResultTitle}>
+                Result for Spot {spotIndex}
+              </Text>
+              <Text style={styles.spotResultLine}>
+                🌿 N: {fmt(spotResult.n)}
+              </Text>
+              <Text style={styles.spotResultLine}>
+                🌱 P: {fmt(spotResult.p)}
+              </Text>
+              <Text style={styles.spotResultLine}>
+                🥬 K: {fmt(spotResult.k)}
+              </Text>
+              <Text style={styles.spotResultLine}>
+                💧 pH: {fmtPh(spotResult.ph)}
+              </Text>
+
+              {/* NEW: per-spot NPK levels */}
+              <Text style={styles.spotResultLine}>
+                📊 Level – N: {spotLevelN}   P: {spotLevelP}   K: {spotLevelK}
+              </Text>
+            </View>
+          )}
         </View>
       </View>
 
@@ -322,7 +496,9 @@ export default function SensorReadingScreen() {
               color="#eee"
               style={{ marginRight: 10 }}
             />
-            <Text style={[styles.actionButtonText, styles.disabledButtonText]}>
+            <Text
+              style={[styles.actionButtonText, styles.disabledButtonText]}
+            >
               Processing...
             </Text>
           </TouchableOpacity>
@@ -418,6 +594,29 @@ const styles = StyleSheet.create({
     marginTop: 5,
   },
 
+  // per-spot result box
+  spotResultBox: {
+    marginTop: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    backgroundColor: '#ffffff',
+    borderWidth: 1,
+    borderColor: '#cde9cf',
+    width: '90%',
+  },
+  spotResultTitle: {
+    fontWeight: '700',
+    color: '#1b5e20',
+    marginBottom: 4,
+    textAlign: 'center',
+  },
+  spotResultLine: {
+    fontSize: 14,
+    color: '#1b5e20',
+    marginTop: 2,
+  },
+
   buttonContainer: {},
   actionButton: {
     backgroundColor: '#2e7d32',
@@ -430,7 +629,12 @@ const styles = StyleSheet.create({
     elevation: 3,
     minWidth: 250,
   },
-  actionButtonText: { color: '#fff', fontSize: 16, fontWeight: '600', marginLeft: 8 },
+  actionButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+    marginLeft: 8,
+  },
   disabledButton: { backgroundColor: '#a5d6a7', elevation: 1 },
   disabledButtonText: { color: '#eee' },
 });

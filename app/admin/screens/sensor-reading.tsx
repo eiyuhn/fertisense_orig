@@ -15,6 +15,7 @@ import {
   TextInput,
   TouchableOpacity,
   View,
+  ScrollView,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import Ionicons from '@expo/vector-icons/Ionicons';
@@ -27,7 +28,7 @@ import {
 } from '../../../src/esp32';
 import { useData } from '../../../context/DataContext';
 import { useAuth } from '../../../context/AuthContext';
-import { listFarmers } from '../../../src/services';  // ✅ use listFarmers
+import { listFarmers } from '../../../src/services';
 
 type Farmer = { _id: string; name: string };
 
@@ -49,8 +50,21 @@ const TOTAL_STEPS = 10;
 
 export default function AdminSensorReadingScreen() {
   const router = useRouter();
-  const { farmerId: paramFarmerId } =
-    useLocalSearchParams<{ farmerId?: string }>();
+
+  // 👇 Accept BOTH `farmerName` and `name` (for safety)
+  const {
+    farmerId: paramFarmerId,
+    farmerName: paramFarmerName,
+    name: paramName,
+  } = useLocalSearchParams<{
+    farmerId?: string;
+    farmerName?: string;
+    name?: string;
+  }>();
+
+  const initialFarmerId = paramFarmerId ?? '';
+  const initialFarmerName =
+    (paramFarmerName as string) || (paramName as string) || '';
 
   const { setLatestSensorData } = useData();
   const { token } = useAuth();
@@ -60,37 +74,41 @@ export default function AdminSensorReadingScreen() {
   const [filter, setFilter] = useState('');
   const [pickerOpen, setPickerOpen] = useState(false);
 
-  const [selectedFarmerId, setSelectedFarmerId] = useState<string>(
-    paramFarmerId ?? ''
-  );
+  const [selectedFarmerId, setSelectedFarmerId] =
+    useState<string>(initialFarmerId);
   const [selectedFarmerName, setSelectedFarmerName] =
-    useState<string>('');
+    useState<string>(initialFarmerName);
 
   const loadFarmers = useCallback(async () => {
     try {
-      const data = await listFarmers(token); // ✅ use existing service
-      const list = (Array.isArray(data)
-        ? data
-        : []) as Farmer[];
-
+      const data = await listFarmers(token);
+      const list = (Array.isArray(data) ? data : []) as Farmer[];
       setFarmers(list);
 
-      if (paramFarmerId) {
-        const f = list.find((x) => x._id === paramFarmerId);
-        if (f) setSelectedFarmerName(f.name);
+      // If we have an ID but no name yet, try to resolve name from the list
+      if (initialFarmerId && !selectedFarmerName) {
+        const f = list.find((x) => x._id === initialFarmerId);
+        if (f) {
+          setSelectedFarmerId(f._id);
+          setSelectedFarmerName(f.name);
+        }
       }
     } catch (e) {
       console.error('listFarmers error:', e);
       Alert.alert(
-        'Error',
-        'Could not load farmers from the server.'
+        'Cannot load farmers',
+        'Farmers could not be loaded from the server. ' +
+          'If you are connected to the ESP32 Wi-Fi, go back to Home and select a farmer while online.'
       );
     }
-  }, [token, paramFarmerId]);
+  }, [token, initialFarmerId, selectedFarmerName]);
 
+  // ⛔ Only auto-load when we don't already have a preselected farmerId.
   useEffect(() => {
-    loadFarmers();
-  }, [loadFarmers]);
+    if (!initialFarmerId) {
+      loadFarmers();
+    }
+  }, [loadFarmers, initialFarmerId]);
 
   const filteredFarmers = farmers.filter((f) =>
     f.name.toLowerCase().includes(filter.trim().toLowerCase())
@@ -102,13 +120,30 @@ export default function AdminSensorReadingScreen() {
     setPickerOpen(false);
   };
 
+  // Lazy-load farmers when opening picker
+  const handleOpenFarmerPicker = async () => {
+    if (farmers.length === 0) {
+      await loadFarmers();
+    }
+    setPickerOpen(true);
+  };
+
   // ---------- Reading state ----------
   const [currentStep, setCurrentStep] = useState(0);
   const [readings, setReadings] = useState<NpkJson[]>([]);
   const [isReadingStep, setIsReadingStep] = useState(false);
-  const [statusMessage, setStatusMessage] = useState<string>(
-    'Select a farmer to begin.'
-  );
+  const [statusMessage, setStatusMessage] =
+    useState<string>('Select a farmer to begin.');
+  const [isInitialLoad, setIsInitialLoad] = useState(false);
+
+  // 👇 New: last spot result to show under status text
+  const [lastSpotResult, setLastSpotResult] = useState<{
+    step: number;
+    n: number;
+    p: number;
+    k: number;
+    ph?: number;
+  } | null>(null);
 
   const abortRef = useRef<{ cancelled: boolean }>({
     cancelled: false,
@@ -119,6 +154,8 @@ export default function AdminSensorReadingScreen() {
     setReadings([]);
     setIsReadingStep(false);
     setStatusMessage('Select a farmer to begin.');
+    setIsInitialLoad(false);
+    setLastSpotResult(null);
     abortRef.current.cancelled = false;
     return () => {
       abortRef.current.cancelled = true;
@@ -184,7 +221,6 @@ export default function AdminSensorReadingScreen() {
         readings: allReadings,
       };
 
-      // save in context before switching Wi-Fi
       setLatestSensorData(finalResult);
 
       await new Promise((r) => setTimeout(r, 900));
@@ -228,9 +264,20 @@ export default function AdminSensorReadingScreen() {
 
     setIsReadingStep(true);
     const stepToRead = currentStep;
+
+    // Clear last result when starting a new read
+    setLastSpotResult(null);
+
     setStatusMessage(
       `📍 ${stepToRead}/${TOTAL_STEPS} - Reading soil...`
     );
+
+    // ⏳ Simulate longer sensor reading time (3.5s)
+    await new Promise((r) => setTimeout(r, 3500));
+    if (abortRef.current.cancelled) {
+      setIsReadingStep(false);
+      return;
+    }
 
     let data: NpkJson | null = null;
     for (let attempt = 1; attempt <= 2 && !data; attempt++) {
@@ -251,10 +298,7 @@ export default function AdminSensorReadingScreen() {
       setStatusMessage(
         `Failed read ${stepToRead}. Press button to try again.`
       );
-      Alert.alert(
-        'No Data',
-        'Walang nabasang data. Subukan ulit.'
-      );
+      Alert.alert('No Data', 'Walang nabasang data. Subukan ulit.');
       return;
     }
     if (
@@ -272,6 +316,18 @@ export default function AdminSensorReadingScreen() {
       );
       return;
     }
+
+    // Save last spot result to show under status text
+    setLastSpotResult({
+      step: stepToRead,
+      n: data.n!,
+      p: data.p!,
+      k: data.k!,
+      ph:
+        typeof data.ph === 'number'
+          ? data.ph
+          : undefined,
+    });
 
     const newReadings = [...readings, data];
     setReadings(newReadings);
@@ -304,13 +360,20 @@ export default function AdminSensorReadingScreen() {
       );
       return;
     }
-    if (currentStep !== 0 || isReadingStep) return;
+    if (currentStep !== 0 || isReadingStep || isInitialLoad) return;
 
     setIsReadingStep(true);
+    setIsInitialLoad(true);
     setStatusMessage(`Checking connection to ${ESP_SSID}...`);
+
     try {
       await autoConnectToESP32();
       if (abortRef.current.cancelled) return;
+
+      setStatusMessage('Preparing sensor, please wait...');
+      await new Promise((r) => setTimeout(r, 3200));
+      if (abortRef.current.cancelled) return;
+
       setCurrentStep(1);
       setStatusMessage(
         `Ready to read spot 1/${TOTAL_STEPS}. Press button.`
@@ -323,144 +386,198 @@ export default function AdminSensorReadingScreen() {
       );
       setStatusMessage('Connection failed. Try Start again.');
     } finally {
-      if (!abortRef.current.cancelled) setIsReadingStep(false);
+      if (!abortRef.current.cancelled) {
+        setIsReadingStep(false);
+        setIsInitialLoad(false);
+      }
     }
   };
+
+  // ---------- Circle label ----------
+  const circleLabel = (() => {
+    if (!selectedFarmerId) return 'Select\nFarmer';
+    if (currentStep === 0 && (isReadingStep || isInitialLoad))
+      return 'Connecting\n...';
+    if (currentStep === 0) return 'Ready';
+    if (currentStep > TOTAL_STEPS) return 'Done';
+    return `${currentStep}/${TOTAL_STEPS}`;
+  })();
 
   // ---------- UI ----------
   return (
     <View style={styles.container}>
-      <Image
-        source={require('../../../assets/images/fertisense-logo.png')}
-        style={styles.logo}
-      />
+      <ScrollView
+        contentContainerStyle={styles.scrollContent}
+        keyboardShouldPersistTaps="handled"
+      >
+        <Image
+          source={require('../../../assets/images/fertisense-logo.png')}
+          style={styles.logo}
+        />
 
-      {/* Farmer selector */}
-      <View style={styles.selectorBox}>
-        <Text style={styles.selectorLabel}>Select Farmer</Text>
-        <View style={styles.selectorRow}>
-          <Text style={styles.selectorValue}>
-            {selectedFarmerName
-              ? `${selectedFarmerName} (${selectedFarmerId})`
-              : '— none —'}
-          </Text>
-          <TouchableOpacity
-            style={styles.selectorBtn}
-            onPress={() => setPickerOpen(true)}
-          >
-            <Ionicons
-              name="people-outline"
-              size={18}
-              color="#fff"
-            />
-            <Text style={styles.selectorBtnText}>
-              {selectedFarmerId ? 'Change' : 'Choose'}
+        {/* Farmer info */}
+        <View style={styles.selectorBox}>
+          <Text style={styles.selectorLabel}>Reading for</Text>
+          <View style={styles.selectorRow}>
+            <Text style={styles.selectorValue} numberOfLines={1}>
+              {selectedFarmerName || '— none —'}
             </Text>
-          </TouchableOpacity>
-        </View>
-      </View>
 
-      {/* Reading box */}
-      <View style={styles.readingBox}>
-        <Text style={styles.title}>Insert Sensor into Soil</Text>
-        <Text style={styles.engSub}>
-          Take {TOTAL_STEPS} readings. Press button for each spot.
-        </Text>
-        <Text style={styles.tagalogSub}>
-          Kumuha ng {TOTAL_STEPS} readings. Pindutin ang button
-          kada spot.
-        </Text>
-        <View style={styles.statusDisplay}>
-          {isReadingStep && (
-            <ActivityIndicator
-              size="large"
-              color="#2e7d32"
-              style={styles.activityIndicator}
-            />
-          )}
-          {currentStep >= 0 &&
-            currentStep <= TOTAL_STEPS + 1 && (
-              <Text style={styles.statusText}>
-                {statusMessage}
-              </Text>
+            {!selectedFarmerId && (
+              <TouchableOpacity
+                style={styles.selectorBtn}
+                onPress={handleOpenFarmerPicker}
+              >
+                <Ionicons
+                  name="people-outline"
+                  size={18}
+                  color="#fff"
+                />
+                <Text style={styles.selectorBtnText}>Choose</Text>
+              </TouchableOpacity>
             )}
+          </View>
         </View>
-      </View>
 
-      <View style={styles.buttonContainer}>
-        {currentStep === 0 && (
-          <TouchableOpacity
-            style={[
-              styles.actionButton,
-              isReadingStep && styles.disabledButton,
-            ]}
-            onPress={handleStart}
-            disabled={isReadingStep}
-          >
-            <Ionicons
-              name="hardware-chip-outline"
-              size={22}
-              color={isReadingStep ? '#eee' : '#fff'}
-            />
-            <Text
-              style={[
-                styles.actionButtonText,
-                isReadingStep && styles.disabledButtonText,
-              ]}
-            >
-              {isReadingStep ? 'Checking...' : 'Start Reading'}
-            </Text>
-          </TouchableOpacity>
-        )}
+        {/* Reading box */}
+        <View style={styles.readingBox}>
+          <Text style={styles.title}>Insert Sensor into Soil</Text>
+          <Text style={styles.engSub}>
+            Take {TOTAL_STEPS} readings. Press the button for each
+            spot.
+          </Text>
+          <Text style={styles.tagalogSub}>
+            Kumuha ng {TOTAL_STEPS} readings. Pindutin ang button
+            kada spot.
+          </Text>
 
-        {currentStep > 0 && currentStep <= TOTAL_STEPS && (
-          <TouchableOpacity
-            style={[
-              styles.actionButton,
-              isReadingStep && styles.disabledButton,
-            ]}
-            onPress={handleReadNextStep}
-            disabled={isReadingStep}
-          >
-            <Ionicons
-              name="radio-button-on-outline"
-              size={22}
-              color={isReadingStep ? '#eee' : '#fff'}
-            />
-            <Text
-              style={[
-                styles.actionButtonText,
-                isReadingStep && styles.disabledButtonText,
-              ]}
-            >
-              {isReadingStep
-                ? `Reading Spot ${currentStep}...`
-                : `Read Spot ${currentStep}/${TOTAL_STEPS}`}
-            </Text>
-          </TouchableOpacity>
-        )}
+          <View style={styles.circleWrapper}>
+            <View style={styles.circleOuter}>
+              <View style={styles.circleInner}>
+                {(isReadingStep || isInitialLoad) && (
+                  <ActivityIndicator
+                    size="large"
+                    color="#2e7d32"
+                    style={{ marginBottom: 4 }}
+                  />
+                )}
+                <Text style={styles.circleText}>{circleLabel}</Text>
+              </View>
+            </View>
+          </View>
 
-        {currentStep > TOTAL_STEPS && (
-          <TouchableOpacity
-            style={[styles.actionButton, styles.disabledButton]}
-            disabled
-          >
-            <ActivityIndicator
-              size="small"
-              color="#eee"
-              style={{ marginRight: 10 }}
-            />
-            <Text
+          <View style={styles.statusDisplay}>
+            {currentStep >= 0 &&
+              currentStep <= TOTAL_STEPS + 1 && (
+                <Text style={styles.statusText}>
+                  {statusMessage}
+                </Text>
+              )}
+          </View>
+
+          {/* 👇 Last spot result shown under status */}
+          {lastSpotResult && (
+            <View style={styles.lastResultBox}>
+              <Text style={styles.lastResultTitle}>
+                Spot {lastSpotResult.step} result
+              </Text>
+              <Text style={styles.lastResultText}>
+                N: {lastSpotResult.n} | P: {lastSpotResult.p} | K:{' '}
+                {lastSpotResult.k}
+              </Text>
+              {typeof lastSpotResult.ph === 'number' && (
+                <Text style={styles.lastResultText}>
+                  pH: {lastSpotResult.ph}
+                </Text>
+              )}
+            </View>
+          )}
+        </View>
+
+        <View style={styles.buttonContainer}>
+          {currentStep === 0 && (
+            <TouchableOpacity
               style={[
-                styles.actionButtonText,
-                styles.disabledButtonText,
+                styles.actionButton,
+                (isReadingStep || isInitialLoad) &&
+                  styles.disabledButton,
               ]}
+              onPress={handleStart}
+              disabled={isReadingStep || isInitialLoad}
             >
-              Processing...
-            </Text>
-          </TouchableOpacity>
-        )}
-      </View>
+              <Ionicons
+                name="hardware-chip-outline"
+                size={22}
+                color={
+                  isReadingStep || isInitialLoad ? '#eee' : '#fff'
+                }
+              />
+              <Text
+                style={[
+                  styles.actionButtonText,
+                  (isReadingStep || isInitialLoad) &&
+                    styles.disabledButtonText,
+                ]}
+              >
+                {isReadingStep || isInitialLoad
+                  ? 'Connecting...'
+                  : 'Start Reading'}
+              </Text>
+            </TouchableOpacity>
+          )}
+
+          {currentStep > 0 && currentStep <= TOTAL_STEPS && (
+            <TouchableOpacity
+              style={[
+                styles.actionButton,
+                isReadingStep && styles.disabledButton,
+              ]}
+              onPress={handleReadNextStep}
+              disabled={isReadingStep}
+            >
+              <Ionicons
+                name="radio-button-on-outline"
+                size={22}
+                color={isReadingStep ? '#eee' : '#fff'}
+              />
+              <Text
+                style={[
+                  styles.actionButtonText,
+                  isReadingStep && styles.disabledButtonText,
+                ]}
+              >
+                {isReadingStep
+                  ? `Reading Spot ${currentStep}...`
+                  : `Read Spot ${currentStep}/${TOTAL_STEPS}`}
+              </Text>
+            </TouchableOpacity>
+          )}
+
+          {currentStep > TOTAL_STEPS && (
+            <TouchableOpacity
+              style={[
+                styles.actionButton,
+                styles.disabledButton,
+              ]}
+              disabled
+            >
+              <ActivityIndicator
+                size="small"
+                color="#eee"
+                style={{ marginRight: 10 }}
+              />
+              <Text
+                style={[
+                  styles.actionButtonText,
+                  styles.disabledButtonText,
+                ]}
+              >
+                Processing...
+              </Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      </ScrollView>
 
       {/* Farmer Picker Modal */}
       <Modal
@@ -488,8 +605,12 @@ export default function AdminSensorReadingScreen() {
                   style={styles.farmerRow}
                   onPress={() => chooseFarmer(item)}
                 >
-                  <Text style={styles.farmerName}>{item.name}</Text>
-                  <Text style={styles.farmerId}>{item._id}</Text>
+                  <Text style={styles.farmerName}>
+                    {item.name}
+                  </Text>
+                  <Text style={styles.farmerId}>
+                    {item._id}
+                  </Text>
                 </TouchableOpacity>
               )}
               ListEmptyComponent={
@@ -522,16 +643,18 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#fff',
-    alignItems: 'center',
-    paddingTop: 40,
+  },
+  scrollContent: {
+    paddingTop: 32,
     paddingHorizontal: 24,
-    justifyContent: 'flex-start',
+    paddingBottom: 24,
+    alignItems: 'center',
   },
   logo: {
-    width: 200,
-    height: 200,
+    width: 180,
+    height: 180,
     resizeMode: 'contain',
-    marginBottom: -10,
+    marginBottom: -4,
   },
 
   selectorBox: {
@@ -574,12 +697,12 @@ const styles = StyleSheet.create({
 
   readingBox: {
     backgroundColor: '#f1fbf1',
-    padding: 26,
+    padding: 24,
     borderRadius: 18,
     width: '100%',
-    elevation: 5,
+    elevation: 3,
     alignItems: 'center',
-    marginBottom: 28,
+    marginBottom: 20,
   },
   title: {
     fontSize: 20,
@@ -599,24 +722,81 @@ const styles = StyleSheet.create({
     color: '#555',
     textAlign: 'center',
     fontStyle: 'italic',
-    marginBottom: 20,
+    marginBottom: 18,
   },
+
+  circleWrapper: {
+    marginBottom: 16,
+    marginTop: 4,
+  },
+  circleOuter: {
+    width: 150,
+    height: 150,
+    borderRadius: 75,
+    borderWidth: 10,
+    borderColor: '#2e7d32',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#e8f5e9',
+  },
+  circleInner: {
+    width: 110,
+    height: 110,
+    borderRadius: 55,
+    backgroundColor: '#ffffff',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  circleText: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#2e7d32',
+    textAlign: 'center',
+  },
+
   statusDisplay: {
-    minHeight: 80,
+    minHeight: 60,
     alignItems: 'center',
     justifyContent: 'center',
     width: '100%',
+    marginTop: 4,
   },
-  activityIndicator: { marginBottom: 12 },
   statusText: {
-    fontSize: 16,
+    fontSize: 15,
     color: '#2e7d32',
     fontWeight: '600',
     textAlign: 'center',
     marginTop: 5,
   },
 
-  buttonContainer: {},
+  // New styles for last spot result
+  lastResultBox: {
+    marginTop: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: '#e8f5e9',
+    width: '100%',
+  },
+  lastResultTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#1b5e20',
+    marginBottom: 4,
+    textAlign: 'center',
+  },
+  lastResultText: {
+    fontSize: 13,
+    color: '#2e7d32',
+    textAlign: 'center',
+  },
+
+  buttonContainer: {
+    marginTop: 12,
+    marginBottom: 8,
+    alignItems: 'center',
+    width: '100%',
+  },
   actionButton: {
     backgroundColor: '#2e7d32',
     flexDirection: 'row',

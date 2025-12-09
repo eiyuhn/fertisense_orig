@@ -89,7 +89,9 @@ export async function loginApi(payload: LoginPayload): Promise<LoginResponse> {
   return data;
 }
 
-export async function registerApi(payload: RegisterPayload): Promise<LoginResponse> {
+export async function registerApi(
+  payload: RegisterPayload
+): Promise<LoginResponse> {
   const { data } = await api.post('/api/auth/register', payload);
   return data;
 }
@@ -120,7 +122,10 @@ export async function getFarmer(
   return Array.isArray(data) ? data[0] ?? null : data ?? null;
 }
 
-export async function createFarmer(body: any, token?: string | null): Promise<any> {
+export async function createFarmer(
+  body: any,
+  token?: string | null
+): Promise<any> {
   const { code: _omit, ...rest } = body || {};
   try {
     const { data } = await api.post('/api/farmers', rest, {
@@ -208,6 +213,11 @@ export async function putPriceSettings(
 }
 
 /* ===== Readings (Farmer Logs) ===== */
+
+/**
+ * Get embedded readings for a farmer.
+ * Backend route: GET /api/farmers/:farmerId/readings
+ */
 export async function listReadingsByFarmer(
   farmerId: string,
   token?: string | null
@@ -218,33 +228,53 @@ export async function listReadingsByFarmer(
   return Array.isArray(data) ? data : [];
 }
 
-/* === addReading sends {points:[...]} for addReadingBatch (ADMIN flow) === */
+/**
+ * ADMIN flow:
+ * Save ESP32 reading as a *single embedded reading* for a farmer.
+ *
+ * Backend route (farmers router):
+ *   POST /api/farmers/:farmerId/readings
+ * handled by farmerController.addReading
+ */
 export async function addReading(
   body: AddReadingParams,
   token?: string | null
 ): Promise<any> {
   const { farmerId, ...rest } = body;
 
-  const cleanPoint = {
-    N: Number(rest.N ?? 0),
-    P: Number(rest.P ?? 0),
-    K: Number(rest.K ?? 0),
+  // match farmerController.normalizeNPK → n/p/k + optional ph, source
+  const payload: any = {
+    n: Number(rest.N ?? 0),
+    p: Number(rest.P ?? 0),
+    k: Number(rest.K ?? 0),
     ph: rest.ph != null ? Number(rest.ph) : undefined,
-    ec: rest.ec != null ? Number(rest.ec) : undefined,
-    moisture: rest.moisture != null ? Number(rest.moisture) : undefined,
-    temp: rest.temp != null ? Number(rest.temp) : undefined,
-    source: rest.source ?? 'manual',
+    source: rest.source ?? 'esp32',
   };
 
-  const payload = { points: [cleanPoint], meta: { client: 'app', version: 1 } };
+  // optional extras (ignored by schema if not defined)
+  if (rest.moisture != null) payload.moisture = Number(rest.moisture);
+  if (rest.ec != null) payload.ec = Number(rest.ec);
+  if (rest.temp != null) payload.temp = Number(rest.temp);
 
-  const { data } = await api.post(`/api/farmers/${farmerId}/readings`, payload, {
-    headers: authHeaders(token || undefined),
-  });
+  const { data } = await api.post(
+    `/api/farmers/${farmerId}/readings`,
+    payload,
+    {
+      headers: authHeaders(token || undefined),
+    }
+  );
+
   return data;
 }
 
-/* === Standalone reading (no farmerId) → POST /api/readings (STAKEHOLDER) === */
+/**
+ * STAKEHOLDER flow:
+ * Standalone reading (no farmerId) – stored in Reading collection.
+ *
+ * Backend route (from readings.js):
+ *   POST /api/readings
+ * handled by readingController.createReading
+ */
 export async function addStandaloneReading(
   body: AddStandaloneReadingParams,
   token?: string | null
@@ -267,6 +297,11 @@ export async function addStandaloneReading(
   return data;
 }
 
+/**
+ * Update an embedded farmer reading.
+ * Backend route (farmers router, not readings.js):
+ *   PATCH /api/farmers/:farmerId/readings/:readingId
+ */
 export async function updateReading(
   farmerId: string,
   readingId: string,
@@ -291,6 +326,11 @@ export async function updateReading(
   return data;
 }
 
+/**
+ * Delete an embedded farmer reading.
+ * Backend route:
+ *   DELETE /api/farmers/:farmerId/readings/:readingId
+ */
 export async function deleteReading(
   farmerId: string,
   readingId: string,
@@ -404,4 +444,29 @@ export async function getRecommendation(
 
   // safe empty
   return { ok: !!data?.ok, plans: [], updatedAt: data?.updatedAt };
+}
+
+/* ===== Forgot Password (Email + Mobile + Code) ===== */
+
+export async function requestPasswordReset(email: string, mobile: string) {
+  const { data } = await api.post('/api/auth/request-password-reset', {
+    email,
+    mobile,
+  });
+  return data;
+}
+
+export async function resetPasswordApi(
+  email: string,
+  mobile: string,
+  code: string,
+  newPassword: string
+) {
+  const { data } = await api.post('/api/auth/reset-password', {
+    email,
+    mobile,
+    code,
+    newPassword,
+  });
+  return data;
 }

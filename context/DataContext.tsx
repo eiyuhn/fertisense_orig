@@ -15,6 +15,13 @@ export type SensorData = {
   p: number;
   k: number;
   ph?: number;
+
+  // 👇 added so admin recommendation & logs can use them
+  farmerId?: string;
+  farmerName?: string;
+
+  // optional raw spot readings if you store them
+  readings?: any[];
 };
 
 export type Reading = {
@@ -28,12 +35,14 @@ export type Reading = {
   recommendation?: string[];        // [filipino, english]
   sensorData?: SensorData[];
   fertilizerPlans?: FertilizerPlan[];
-  backendFarmerId?: string;        // optional link to Mongo _id
+  backendFarmerId?: string;
+  FarmerName?: string;
+  readings?: any[];
 };
 
 export type Farmer = {
   id: string;                       // local id (uuid or server fallback)
-  backendId?: string;               // ← NEW: Mongo _id
+  backendId?: string;               // Mongo _id
   name: string;
   code: string;
   location: string;
@@ -64,16 +73,26 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
   const [farmers, setFarmers] = useState<Farmer[]>([]);
   const [latestSensorData, setLatestSensorData] = useState<SensorData | null>(null);
 
-  const addReading = (reading: Reading) => setReadings(prev => [...prev, reading]);
+  const addReading = (reading: Reading) =>
+    setReadings(prev => [...prev, reading]);
+
   const addFarmer = (farmer: Farmer) => {
-setFarmers(prev => [farmer, ...prev]);  // 👈 newest first
-};
+    setFarmers(prev => [farmer, ...prev]); // newest first
+  };
+
   return (
-    <DataContext.Provider value={{
-      readings, setReadings, addReading,
-      farmers, setFarmers, addFarmer,
-      latestSensorData, setLatestSensorData,
-    }}>
+    <DataContext.Provider
+      value={{
+        readings,
+        setReadings,
+        addReading,
+        farmers,
+        setFarmers,
+        addFarmer,
+        latestSensorData,
+        setLatestSensorData,
+      }}
+    >
       {children}
     </DataContext.Provider>
   );

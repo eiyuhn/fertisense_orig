@@ -13,9 +13,11 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import NetInfo from '@react-native-community/netinfo';
 import Ionicons from '@expo/vector-icons/Ionicons';
 
+import { useReadingSession } from '../../../context/ReadingSessionContext';
+
 type Params = {
   farmerId?: string;
-  name?: string;
+  name?: string;   // from sensor-reading
   n?: string;
   p?: string;
   k?: string;
@@ -24,35 +26,47 @@ type Params = {
 
 export default function AdminReconnectPromptScreen() {
   const router = useRouter();
+  const { setFromParams } = useReadingSession();
+
   const { farmerId, name, n, p, k, ph } = useLocalSearchParams<Params>();
 
   const [isOnline, setIsOnline] = useState(false);
   const [checking, setChecking] = useState(true);
 
-  const goToRecommendation = useCallback(() => {
-    // ⛳️ Adjust this path if your admin recommendation file has another route
+  const goToRecommendation = useCallback(async () => {
+    // ✅ Save to ReadingSession so recommendation.tsx always has something
+    await setFromParams({
+      n,
+      p,
+      k,
+      ph,
+      farmerId: farmerId ?? undefined,
+      farmerName: name ?? undefined,
+    });
+
+    // ⛳️ Go to admin recommendation screen with same params
     router.replace({
       pathname: '/admin/screens/recommendation',
       params: {
         farmerId: farmerId ?? '',
-        name: name ?? '',
+        farmerName: name ?? '',
         n: n ?? '0',
         p: p ?? '0',
         k: k ?? '0',
         ph: ph ?? '0',
       },
     });
-  }, [router, farmerId, name, n, p, k, ph]);
+  }, [router, farmerId, name, n, p, k, ph, setFromParams]);
 
   const checkConnectionOnce = useCallback(async () => {
     setChecking(true);
     try {
       const state = await NetInfo.fetch();
-      const online =
-        !!state.isConnected && !!state.isInternetReachable;
+      const online = !!state.isConnected && !!state.isInternetReachable;
       setIsOnline(online);
       if (online) {
-        goToRecommendation();
+        // If we’re online, go right away
+        await goToRecommendation();
       }
     } catch (err) {
       console.error('NetInfo error:', err);
@@ -66,14 +80,14 @@ export default function AdminReconnectPromptScreen() {
   }, [goToRecommendation]);
 
   useEffect(() => {
-    // initial check + subscribe
+    // initial check
     checkConnectionOnce();
 
     const unsub = NetInfo.addEventListener((state) => {
-      const online =
-        !!state.isConnected && !!state.isInternetReachable;
+      const online = !!state.isConnected && !!state.isInternetReachable;
       setIsOnline(online);
       if (online) {
+        // fire and forget
         goToRecommendation();
       }
     });
@@ -93,13 +107,10 @@ export default function AdminReconnectPromptScreen() {
           Step 2 of 2 – Tapos na ang pagbabasa sa ESP32-NPK.
         </Text>
         <Text style={styles.body}>
-          1. Lumabas sa <Text style={styles.bold}>ESP32-NPK</Text>{' '}
-          Wi-Fi.{'\n'}
-          2. Kumonekta sa{' '}
-          <Text style={styles.bold}>normal Wi-Fi</Text> o{' '}
+          1. Lumabas sa <Text style={styles.bold}>ESP32-NPK</Text> Wi-Fi.{'\n'}
+          2. Kumonekta sa <Text style={styles.bold}>normal Wi-Fi</Text> o{' '}
           <Text style={styles.bold}>mobile data</Text>.{'\n'}
-          3. Kapag may internet na, automatic kang dadalhin sa
-          fertilizer recommendation page.
+          3. Kapag may internet na, automatic kang dadalhin sa fertilizer recommendation page.
         </Text>
 
         <View style={styles.statusBox}>
