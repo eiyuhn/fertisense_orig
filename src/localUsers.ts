@@ -1,26 +1,27 @@
+// src/localUsers.ts
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export type LocalUser = {
+  username: string;
   name: string;
-  email: string;
   password: string;
   role: 'stakeholder' | 'admin';
   address?: string;
   farmLocation?: string;
   mobile?: string;
   profileImage?: string | null;
-  offlineOnly?: boolean; // true if not yet synced
+  offlineOnly?: boolean;
 };
 
 const PREFIX = 'localUser:';
 
-export async function getLocalUser(email: string): Promise<LocalUser | null> {
-  const raw = await AsyncStorage.getItem(`${PREFIX}${email}`);
+export async function getLocalUser(username: string): Promise<LocalUser | null> {
+  const raw = await AsyncStorage.getItem(`${PREFIX}${username}`);
   return raw ? (JSON.parse(raw) as LocalUser) : null;
 }
 
 export async function setLocalUser(user: LocalUser): Promise<void> {
-  await AsyncStorage.setItem(`${PREFIX}${user.email}`, JSON.stringify(user));
+  await AsyncStorage.setItem(`${PREFIX}${user.username}`, JSON.stringify(user));
 }
 
 export async function upsertLocalUserMirror(
@@ -29,7 +30,7 @@ export async function upsertLocalUserMirror(
   offlineOnly: boolean
 ) {
   const newUser: LocalUser = { ...user, password, offlineOnly };
-  await AsyncStorage.setItem(`${PREFIX}${user.email}`, JSON.stringify(newUser));
+  await AsyncStorage.setItem(`${PREFIX}${user.username}`, JSON.stringify(newUser));
 }
 
 export async function getAllLocalUsers(): Promise<LocalUser[]> {

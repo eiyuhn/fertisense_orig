@@ -15,8 +15,8 @@ import {
 } from 'react-native';
 import WifiManager from 'react-native-wifi-reborn';
 
-const ESP32_SSID = 'ESP32-NPK';      // 👈 change if your ESP32 uses a different SSID
-// const ESP32_PASSWORD = '';        // only needed if your AP has a password
+const ESP32_SSID = 'ESP32-NPK'; // 👈 change if your ESP32 uses a different SSID
+// const ESP32_PASSWORD = '';   // only needed if your AP has a password
 
 export default function ConnectInstructionsScreen() {
   const router = useRouter();
@@ -80,6 +80,7 @@ export default function ConnectInstructionsScreen() {
 
       // ✅ After successful connection, go to select-options
       if (!farmerId) {
+        // no farmer yet → just proceed, or you could force selection first
         router.replace('/admin/screens/select-options');
         return;
       }
@@ -104,8 +105,10 @@ export default function ConnectInstructionsScreen() {
   };
 
   const handleChangeFarmer = () => {
-    // Just go back to previous screen where you chose the farmer
-    router.back();
+    // 🔁 Go to Farmer Logs so user can choose a farmer from there.
+    // When they tap the scan icon on a farmer card, logs.tsx will push
+    // back to this screen with the new farmerId + farmerName.
+    router.replace('/admin/tabs/logs');
   };
 
   return (
@@ -160,9 +163,12 @@ export default function ConnectInstructionsScreen() {
         <Text style={styles.ctaText}>{isConnecting ? 'Connecting…' : 'Connect'}</Text>
       </TouchableOpacity>
 
-      {/* Optional cancel button (if you want to use it somewhere) */}
+      {/* Optional cancel button */}
       {/* 
-      <TouchableOpacity style={[styles.cta, { backgroundColor: '#ccc', marginTop: 12 }]} onPress={handleCancel}>
+      <TouchableOpacity
+        style={[styles.cta, { backgroundColor: '#ccc', marginTop: 12 }]}
+        onPress={handleCancel}
+      >
         <Text style={[styles.ctaText, { color: '#333' }]}>Cancel</Text>
       </TouchableOpacity>
       */}
@@ -170,7 +176,13 @@ export default function ConnectInstructionsScreen() {
   );
 }
 
-function InstructionRow({ icon, text }: { icon: keyof typeof Ionicons.glyphMap; text: string }) {
+function InstructionRow({
+  icon,
+  text,
+}: {
+  icon: keyof typeof Ionicons.glyphMap;
+  text: string;
+}) {
   return (
     <View style={rowStyles.row}>
       <View style={rowStyles.bullet}>

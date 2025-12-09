@@ -41,15 +41,14 @@ type NpkJson = {
   p_kg_ha?: number;
   k_kg_ha?: number;
   error?: string;
-  // NEW: levels block from ESP32 (if firmware is updated)
+  // From ESP32 firmware (if present)
   levels?: Levels;
 };
 
 const TOTAL_STEPS = 10;
-// 🔁 minimum time for each spot reading so spinner does a “full circle”
+// minimum time for each spot reading so spinner does a “full circle”
 const MIN_READING_DURATION_MS = 3500; // 3.5 seconds
 
-// 🔢 Local helper – same thresholds as ESP32 & recommendation screen
 // LOW:    0–117
 // MEDIUM: 118–235
 // HIGH:   236+
@@ -74,7 +73,7 @@ export default function SensorReadingScreen() {
     'Press Start to begin.'
   );
 
-  // 👇 per-spot display
+  // per-spot display
   const [spotResult, setSpotResult] = useState<NpkJson | null>(null);
   const [spotIndex, setSpotIndex] = useState<number | null>(null);
 
@@ -94,16 +93,52 @@ export default function SensorReadingScreen() {
     };
   }, []);
 
+  // 🔧 FIXED: show real ESP32 / network errors instead of always null
   const readOnce = useCallback(async (): Promise<NpkJson | null> => {
     try {
+      console.log('[SensorReading] calling readNpkFromESP32()...');
       const data = await readNpkFromESP32();
-      if (data && typeof data === 'object' && 'ok' in data) {
-        return data as NpkJson;
+
+      console.log('[SensorReading] raw ESP32 data:', data);
+
+      if (!data || typeof data !== 'object') {
+        Alert.alert(
+          'Invalid Response',
+          'ESP32 returned an invalid response (not a JSON object).'
+        );
+        return null;
       }
-      console.warn('readOnce received invalid data:', data);
-      return null;
+
+      // If firmware sends { ok:false, error:"..." }
+      if ((data as any).ok === false) {
+        const errMsg =
+          (data as any).error || 'ESP32 responded with ok=false (sensor error).';
+        Alert.alert('Sensor Error', errMsg);
+        return null;
+      }
+
+      // Expect n, p, k as numbers
+      const { n, p, k } = data as any;
+      if (
+        typeof n !== 'number' ||
+        typeof p !== 'number' ||
+        typeof k !== 'number'
+      ) {
+        Alert.alert(
+          'Invalid Data',
+          'ESP32 did not return numeric NPK values.'
+        );
+        return null;
+      }
+
+      // Valid reading
+      return data as NpkJson;
     } catch (e: any) {
-      console.error('Error in readOnce:', e);
+      console.error('[SensorReading] readOnce error:', e);
+      Alert.alert(
+        'Read Error',
+        e?.message || 'Could not read from ESP32 (network or sensor error).'
+      );
       return null;
     }
   }, []);
@@ -129,9 +164,7 @@ export default function SensorReadingScreen() {
 
       const avg = (arr: number[]) =>
         arr.length
-          ? Math.round(
-              (arr.reduce((a, b) => a + b, 0) / arr.length) * 10
-            ) / 10
+          ? Math.round((arr.reduce((a, b) => a + b, 0) / arr.length) * 10) / 10
           : 0;
 
       const avgN = avg(Ns);
@@ -152,10 +185,10 @@ export default function SensorReadingScreen() {
         readings: allReadings,
       };
 
-      // 1) store in DataContext (for any immediate views)
+      // 1) store in DataContext
       setLatestSensorData(finalResult);
 
-      // 2) store last reading for this stakeholder → used in Stakeholder Home insights
+      // 2) cache last reading per stakeholder user
       try {
         if (user?._id) {
           const key = `stakeholder:lastReading:${user._id}`;
@@ -175,7 +208,7 @@ export default function SensorReadingScreen() {
         );
       }
 
-      // 3) push into ReadingSessionContext (used by recommendation flows if needed)
+      // 3) push into ReadingSessionContext
       try {
         await setFromParams({
           n: avgN,
@@ -189,7 +222,7 @@ export default function SensorReadingScreen() {
         console.warn('[SensorReading] failed to set reading session:', e);
       }
 
-      // 4) Optional: send as standalone stakeholder reading to backend
+      // 4) optional: send as standalone stakeholder reading to backend
       try {
         if (token) {
           await addStandaloneReading(
@@ -204,10 +237,7 @@ export default function SensorReadingScreen() {
           );
         }
       } catch (e) {
-        console.warn(
-          '[SensorReading] failed to push standalone reading:',
-          e
-        );
+        console.warn('[SensorReading] failed to push standalone reading:', e);
       }
 
       // Small pause before navigation
@@ -241,13 +271,13 @@ export default function SensorReadingScreen() {
         return;
       if (abortRef.current.cancelled) return;
 
-      // 🔄 clear previous spot result when starting a new spot
+      // clear previous spot result when starting a new spot
       setSpotResult(null);
       setSpotIndex(null);
 
       setIsReadingStep(true);
       const stepToRead = currentStep;
-      const startTime = Date.now(); // ⏱ start timer for minimum duration
+      const startTime = Date.now();
       setStatusMessage(`${stepToRead}/${TOTAL_STEPS} - Reading soil...`);
 
       let data: NpkJson | null = null;
@@ -264,7 +294,7 @@ export default function SensorReadingScreen() {
         return;
       }
 
-      // 🔁 ensure spinner runs at least MIN_READING_DURATION_MS
+      // ensure spinner runs at least MIN_READING_DURATION_MS
       const elapsed = Date.now() - startTime;
       if (elapsed < MIN_READING_DURATION_MS) {
         await new Promise((r) =>
@@ -300,7 +330,7 @@ export default function SensorReadingScreen() {
         return;
       }
 
-      // ✅ show this spot's result under the status text
+      // show this spot's result under the status text
       setSpotResult(data);
       setSpotIndex(stepToRead);
 
@@ -349,7 +379,7 @@ export default function SensorReadingScreen() {
       ? TOTAL_STEPS
       : currentStep;
 
-  // helper for nice display
+  // helpers for display
   const fmt = (v: any) => {
     if (v === null || v === undefined) return '0';
     const n = Number(v);
@@ -361,7 +391,7 @@ export default function SensorReadingScreen() {
     return Number.isFinite(n) ? n.toFixed(2) : '0.00';
   };
 
-  // 🔎 derive per-spot NPK levels for UI
+  // per-spot NPK levels for UI
   const spotLevelN =
     spotResult?.levels?.n ?? classifyLevel(spotResult?.n);
   const spotLevelP =
@@ -411,7 +441,7 @@ export default function SensorReadingScreen() {
 
           <Text style={styles.statusText}>{statusMessage}</Text>
 
-          {/* 👇 per-spot NPK + pH display */}
+          {/* per-spot NPK + pH display */}
           {spotResult && spotIndex !== null && (
             <View style={styles.spotResultBox}>
               <Text style={styles.spotResultTitle}>
@@ -429,8 +459,6 @@ export default function SensorReadingScreen() {
               <Text style={styles.spotResultLine}>
                 💧 pH: {fmtPh(spotResult.ph)}
               </Text>
-
-              {/* NEW: per-spot NPK levels */}
               <Text style={styles.spotResultLine}>
                 📊 Level – N: {spotLevelN}   P: {spotLevelP}   K: {spotLevelK}
               </Text>
@@ -551,7 +579,6 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
 
-  // big circle
   progressCircle: {
     width: 150,
     height: 150,
@@ -594,7 +621,6 @@ const styles = StyleSheet.create({
     marginTop: 5,
   },
 
-  // per-spot result box
   spotResultBox: {
     marginTop: 10,
     paddingVertical: 8,

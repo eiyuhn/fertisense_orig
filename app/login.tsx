@@ -23,7 +23,7 @@ export default function LoginScreen() {
   const router = useRouter();
   const { login } = useAuth();
 
-  const [email, setEmail] = useState('');
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
@@ -44,13 +44,12 @@ export default function LoginScreen() {
   );
 
   const handleForgotPassword = () => {
-    // Go to the forgot-password screen
     router.push('/forgot-password');
   };
 
   const handleLogin = async () => {
-    const trimmedEmail = email.trim().toLowerCase();
-    if (!trimmedEmail || !password) {
+    const trimmedUsername = username.trim().toLowerCase();
+    if (!trimmedUsername || !password) {
       setError('Please fill in all fields.');
       return;
     }
@@ -60,7 +59,7 @@ export default function LoginScreen() {
       setError('');
 
       const { user: loggedInUser } = await login({
-        email: trimmedEmail,
+        username: trimmedUsername,
         password,
       });
 
@@ -105,15 +104,14 @@ export default function LoginScreen() {
           </TouchableOpacity>
         </View>
 
-        <Text style={styles.label}>Email *</Text>
+        <Text style={styles.label}>Username *</Text>
         <TextInput
           style={styles.input}
-          placeholder="you@example.com"
-          keyboardType="email-address"
+          placeholder="yourusername"
           autoCapitalize="none"
           autoCorrect={false}
-          value={email}
-          onChangeText={setEmail}
+          value={username}
+          onChangeText={setUsername}
         />
 
         <Text style={styles.label}>Password *</Text>
@@ -136,7 +134,6 @@ export default function LoginScreen() {
           </TouchableOpacity>
         </View>
 
-        {/* 🔗 Forgot Password */}
         <TouchableOpacity
           style={styles.forgotButton}
           onPress={handleForgotPassword}

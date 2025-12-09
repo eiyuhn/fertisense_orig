@@ -36,13 +36,18 @@ export default function RegisterScreen() {
   const router = useRouter();
   const { register, login } = useAuth();
 
+  const [username, setUsername] = useState('');
   const [name, setName] = useState('');
   const [address, setAddress] = useState('');
   const [farmLocation, setFarmLocation] = useState('');
   const [mobile, setMobile] = useState('');
-  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+
+  // Fixed security questions (user only answers)
+  const [securityA1, setSecurityA1] = useState('');
+  const [securityA2, setSecurityA2] = useState('');
+
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -51,7 +56,7 @@ export default function RegisterScreen() {
     React.useCallback(() => {
       const handleBack = () => {
         router.replace('/login');
-        return true; // block default behavior
+        return true;
       };
 
       const subscription = BackHandler.addEventListener(
@@ -64,9 +69,11 @@ export default function RegisterScreen() {
   );
 
   const handleRegister = async () => {
+    const normalizedUsername = username.trim().toLowerCase();
+
     const payload: LocalUser = {
+      username: normalizedUsername,
       name: cap(name.trim()),
-      email: email.trim().toLowerCase(),
       password,
       role: 'stakeholder',
       address: cap(address.trim()),
@@ -76,12 +83,23 @@ export default function RegisterScreen() {
       offlineOnly: true,
     };
 
+    const securityQuestions = [
+      {
+        question: "What is your mother's birthplace?",
+        answer: securityA1.trim(),
+      },
+      {
+        question: 'What is the name of your first pet?',
+        answer: securityA2.trim(),
+      },
+    ];
+
     if (
+      !payload.username ||
       !payload.name ||
       !payload.address ||
       !payload.farmLocation ||
       !payload.mobile ||
-      !payload.email ||
       !password ||
       !confirmPassword
     ) {
@@ -92,6 +110,10 @@ export default function RegisterScreen() {
       setError('Passwords do not match.');
       return;
     }
+    if (!securityA1.trim() || !securityA2.trim()) {
+      setError('Please answer both security questions.');
+      return;
+    }
 
     try {
       setBusy(true);
@@ -99,21 +121,23 @@ export default function RegisterScreen() {
       const online = await isOnline();
 
       if (online) {
-        // Explicitly pass a clean object with all required fields for the backend
+        // Online register – note: email is just a dummy empty string
         await register({
+          username: payload.username,
           name: payload.name,
-          email: payload.email,
-          password: payload.password, // Server should handle hashing this
+          password: payload.password,
           role: 'stakeholder',
           address: payload.address,
           farmLocation: payload.farmLocation,
           mobile: payload.mobile,
+          email: '', // required by type, but we don't use it
+          securityQuestions,
         });
 
         await upsertLocalUserMirror(
           {
+            username: payload.username,
             name: payload.name,
-            email: payload.email,
             role: 'stakeholder',
             address: payload.address,
             farmLocation: payload.farmLocation,
@@ -130,15 +154,18 @@ export default function RegisterScreen() {
         return;
       }
 
-      // Offline flow
-      const exists = await getLocalUser(payload.email);
+      // Offline flow (keyed by username)
+      const exists = await getLocalUser(payload.username);
       if (exists) {
         setError('Account already exists offline.');
         return;
       }
 
       await setLocalUser(payload);
-      await login({ email: payload.email, password: payload.password } as any);
+      await login({
+        username: payload.username,
+        password: payload.password,
+      } as any);
 
       Alert.alert('Success', 'Account created offline. Will sync when online.');
       router.replace('/(stakeholder)/tabs/stakeholder-home');
@@ -177,6 +204,16 @@ export default function RegisterScreen() {
           </TouchableOpacity>
           <Text style={styles.tabActive}>Sign Up</Text>
         </View>
+
+        <Text style={styles.label}>Username *</Text>
+        <TextInput
+          style={styles.input}
+          placeholder="Choose a username"
+          autoCapitalize="none"
+          autoCorrect={false}
+          value={username}
+          onChangeText={setUsername}
+        />
 
         <Text style={styles.label}>Full Name *</Text>
         <TextInput
@@ -222,17 +259,6 @@ export default function RegisterScreen() {
           />
         </View>
 
-        <Text style={styles.label}>Email *</Text>
-        <TextInput
-          style={styles.input}
-          placeholder="you@example.com"
-          keyboardType="email-address"
-          autoCapitalize="none"
-          autoCorrect={false}
-          value={email}
-          onChangeText={setEmail}
-        />
-
         <Text style={styles.label}>Password *</Text>
         <TextInput
           style={styles.input}
@@ -249,6 +275,31 @@ export default function RegisterScreen() {
           secureTextEntry
           value={confirmPassword}
           onChangeText={setConfirmPassword}
+        />
+
+        {/* Security Questions */}
+        <Text style={[styles.label, { marginTop: 8 }]}>
+          Security Questions (for password reset)
+        </Text>
+
+        <Text style={styles.subLabel}>
+          1. What is your mother's birthplace? *
+        </Text>
+        <TextInput
+          style={styles.input}
+          placeholder="Example: Cebu, Bukidnon, etc."
+          value={securityA1}
+          onChangeText={setSecurityA1}
+        />
+
+        <Text style={styles.subLabel}>
+          2. What is the name of your first pet? *
+        </Text>
+        <TextInput
+          style={styles.input}
+          placeholder="Example: Bantay, Brownie, etc."
+          value={securityA2}
+          onChangeText={setSecurityA2}
         />
 
         {error ? <Text style={styles.errorText}>{error}</Text> : null}
@@ -282,7 +333,11 @@ const styles = StyleSheet.create({
     marginTop: -40,
     marginBottom: -30,
   },
-  tabContainer: { flexDirection: 'row', justifyContent: 'center', marginBottom: 15 },
+  tabContainer: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    marginBottom: 15,
+  },
   tabActive: {
     fontSize: 15,
     fontWeight: 'bold',
@@ -294,6 +349,7 @@ const styles = StyleSheet.create({
   },
   tabInactive: { fontSize: 15, color: '#999', paddingBottom: 3 },
   label: { fontSize: 14, marginBottom: 3, color: '#333' },
+  subLabel: { fontSize: 13, marginBottom: 3, color: '#555' },
   input: {
     borderWidth: 1,
     borderColor: '#ccc',
@@ -330,6 +386,16 @@ const styles = StyleSheet.create({
     borderRadius: 50,
     marginTop: 10,
   },
-  buttonText: { color: '#fff', textAlign: 'center', fontWeight: 'bold', fontSize: 15 },
-  errorText: { color: 'red', textAlign: 'center', fontSize: 13, marginBottom: 8 },
+  buttonText: {
+    color: '#fff',
+    textAlign: 'center',
+    fontWeight: 'bold',
+    fontSize: 15,
+  },
+  errorText: {
+    color: 'red',
+    textAlign: 'center',
+    fontSize: 13,
+    marginBottom: 8,
+  },
 });
