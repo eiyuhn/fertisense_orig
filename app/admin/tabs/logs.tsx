@@ -442,7 +442,7 @@ export default function LogsScreen() {
       <View style={styles.card}>
         {/* Header row */}
         <View style={styles.cardTop}>
-          <Text style={styles.farmerName}>👩‍🌾 {f.name}</Text>
+          <Text style={styles.farmerName}>{f.name}</Text>
 
           {/* RIGHT ICONS: Reading (left) → Edit → Delete */}
           <View style={styles.rightIcons}>
@@ -508,12 +508,12 @@ export default function LogsScreen() {
                 : '—'}
             </Text>
             <Text style={styles.expRow}>💧 pH: {fmtPh(phVal)}</Text>
-            <Text style={styles.expRow}>🌿 N: {fmt(nVal)}</Text>
-            <Text style={styles.expRow}>🌱 P: {fmt(pVal)}</Text>
-            <Text style={styles.expRow}>🥬 K: {fmt(kVal)}</Text>
+            <Text style={styles.expRow}>N: {fmt(nVal)}</Text>
+            <Text style={styles.expRow}>P: {fmt(pVal)}</Text>
+            <Text style={styles.expRow}>K: {fmt(kVal)}</Text>
 
             <Text style={[styles.expRow, { marginTop: 8, fontWeight: '700' }]}>
-              📊 Total readings: {totalCount}
+            Total readings: {totalCount}
             </Text>
 
             {/* 🔽 ALL readings list (latest first) */}

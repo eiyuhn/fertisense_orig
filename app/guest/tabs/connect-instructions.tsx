@@ -78,53 +78,58 @@ export default function ConnectInstructions() {
       </Text>
 
       {/* Instructions */}
-      <View style={styles.card}>
-        <Text style={styles.cardIntro}>
-          Bago makita ang datos, ikonekta muna ang device sa iyong cellphone.
-        </Text>
+      {/* Instructions */}
+<View style={styles.card}>
+  <Text style={styles.cardIntro}>
+    Ayha makita ang datos, ikonekta una ang device sa imong cellphone.
+  </Text>
 
-        <View style={styles.stepRow}>
-          <View style={styles.iconWrap}>
-            <Image source={icPower} style={styles.icon} />
-          </View>
-          <Text style={styles.stepText}>I-on ang iyong sensor device.</Text>
-        </View>
+  <View style={styles.stepRow}>
+    <View style={styles.iconWrap}>
+      <Image source={icPower} style={styles.icon} />
+    </View>
+    <Text style={styles.stepText}>
+      I-on ang imong sensor device.
+    </Text>
+  </View>
 
-        <View style={styles.stepRow}>
-          <View style={styles.iconWrap}>
-            <Image source={icWifi} style={styles.icon} />
-          </View>
-          <Text style={styles.stepText}>
-            Buksan ang Wi-Fi at hanapin ang <Text style={styles.bold}>“ESP32-NPK”</Text>. Password:{' '}
-            <Text style={styles.bold}>fertisense</Text>
-          </Text>
-        </View>
+  <View style={styles.stepRow}>
+    <View style={styles.iconWrap}>
+      <Image source={icWifi} style={styles.icon} />
+    </View>
+    <Text style={styles.stepText}>
+      I-on ang Wi-Fi ug pangitaa ang <Text style={styles.bold}>“ESP32-NPK”</Text>. 
+    </Text>
+  </View>
 
-        <View style={styles.stepRow}>
-          <View style={styles.iconWrap}>
-            <Image source={icSensor} style={styles.icon} />
-          </View>
-          <Text style={styles.stepText}>
-            Pindutin ang <Text style={styles.bold}>‘Connect’</Text> upang makipag-ugnayan sa sensor.
-          </Text>
-        </View>
+  <View style={styles.stepRow}>
+    <View style={styles.iconWrap}>
+      <Image source={icSensor} style={styles.icon} />
+    </View>
+    <Text style={styles.stepText}>
+      Pinduta ang <Text style={styles.bold}>“Connect”</Text> aron makakonek sa sensor.
+    </Text>
+  </View>
 
-        <View style={styles.stepRow}>
-          <View style={styles.iconWrap}>
-            <Image source={icRice} style={styles.icon} />
-          </View>
-          <Text style={styles.stepText}>Pumili kung anong uri ng palay ang iyong itatanim.</Text>
-        </View>
+  <View style={styles.stepRow}>
+    <View style={styles.iconWrap}>
+      <Image source={icRice} style={styles.icon} />
+    </View>
+    <Text style={styles.stepText}>
+      Pilia kung unsang klase sa humay ang imong itanom.
+    </Text>
+  </View>
 
-        <View style={styles.stepRow}>
-          <View style={styles.iconWrap}>
-            <Image source={icCheck} style={styles.iconTall} />
-          </View>
-          <Text style={styles.stepText}>
-            Hintaying kumonekta o makita ang <Text style={styles.bold}>‘Successful’</Text> na status.
-          </Text>
-        </View>
-      </View>
+  <View style={styles.stepRow}>
+    <View style={styles.iconWrap}>
+      <Image source={icCheck} style={styles.iconTall} />
+    </View>
+    <Text style={styles.stepText}>
+      Hulata nga makakonek ug makita ang <Text style={styles.bold}>“Successful”</Text> nga status.
+    </Text>
+  </View>
+</View>
+
 
       {/* CTA */}
       <TouchableOpacity
@@ -161,7 +166,7 @@ const styles = StyleSheet.create({
   },
 
   logo: {
-    width: 190,
+    width: 110,
     height: 140,
     marginTop: 12,
     marginBottom: 4,

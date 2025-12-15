@@ -1,3 +1,4 @@
+// app/(admin)/screens/sensor-reading.tsx
 import React, {
   useCallback,
   useEffect,
@@ -19,6 +20,7 @@ import {
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import Ionicons from '@expo/vector-icons/Ionicons';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 // --- Production imports (same as stakeholder) ---
 import {
@@ -32,6 +34,12 @@ import { listFarmers } from '../../../src/services';
 
 type Farmer = { _id: string; name: string };
 
+type Levels = {
+  n?: 'LOW' | 'MEDIUM' | 'HIGH' | string;
+  p?: 'LOW' | 'MEDIUM' | 'HIGH' | string;
+  k?: 'LOW' | 'MEDIUM' | 'HIGH' | string;
+};
+
 type NpkJson = {
   ok?: boolean;
   ts?: number;
@@ -44,9 +52,19 @@ type NpkJson = {
   p_kg_ha?: number;
   k_kg_ha?: number;
   error?: string;
+  levels?: Levels;
 };
 
 const TOTAL_STEPS = 10;
+const MIN_READING_DURATION_MS = 3500;
+
+// ✅ Same thresholds as stakeholder screen
+const classifyLevel = (v?: number): 'LOW' | 'MEDIUM' | 'HIGH' | 'N/A' => {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return 'N/A';
+  if (v <= 117) return 'LOW';
+  if (v <= 235) return 'MEDIUM';
+  return 'HIGH';
+};
 
 export default function AdminSensorReadingScreen() {
   const router = useRouter();
@@ -79,29 +97,32 @@ export default function AdminSensorReadingScreen() {
   const [selectedFarmerName, setSelectedFarmerName] =
     useState<string>(initialFarmerName);
 
-  const loadFarmers = useCallback(async () => {
-    try {
-      const data = await listFarmers(token);
-      const list = (Array.isArray(data) ? data : []) as Farmer[];
-      setFarmers(list);
+  const loadFarmers = useCallback(
+    async () => {
+      try {
+        const data = await listFarmers(token);
+        const list = (Array.isArray(data) ? data : []) as Farmer[];
+        setFarmers(list);
 
-      // If we have an ID but no name yet, try to resolve name from the list
-      if (initialFarmerId && !selectedFarmerName) {
-        const f = list.find((x) => x._id === initialFarmerId);
-        if (f) {
-          setSelectedFarmerId(f._id);
-          setSelectedFarmerName(f.name);
+        // If we have an ID but no name yet, try to resolve name from the list
+        if (initialFarmerId && !selectedFarmerName) {
+          const f = list.find((x) => x._id === initialFarmerId);
+          if (f) {
+            setSelectedFarmerId(f._id);
+            setSelectedFarmerName(f.name);
+          }
         }
+      } catch (e) {
+        console.error('listFarmers error:', e);
+        Alert.alert(
+          'Cannot load farmers',
+          'Farmers could not be loaded from the server. ' +
+            'If you are connected to the ESP32 Wi-Fi, go back to Home and select a farmer while online.'
+        );
       }
-    } catch (e) {
-      console.error('listFarmers error:', e);
-      Alert.alert(
-        'Cannot load farmers',
-        'Farmers could not be loaded from the server. ' +
-          'If you are connected to the ESP32 Wi-Fi, go back to Home and select a farmer while online.'
-      );
-    }
-  }, [token, initialFarmerId, selectedFarmerName]);
+    },
+    [token, initialFarmerId, selectedFarmerName]
+  );
 
   // ⛔ Only auto-load when we don't already have a preselected farmerId.
   useEffect(() => {
@@ -136,14 +157,9 @@ export default function AdminSensorReadingScreen() {
     useState<string>('Select a farmer to begin.');
   const [isInitialLoad, setIsInitialLoad] = useState(false);
 
-  // 👇 New: last spot result to show under status text
-  const [lastSpotResult, setLastSpotResult] = useState<{
-    step: number;
-    n: number;
-    p: number;
-    k: number;
-    ph?: number;
-  } | null>(null);
+  // 👇 Spot result (like stakeholder, but admin)
+  const [spotResult, setSpotResult] = useState<NpkJson | null>(null);
+  const [spotIndex, setSpotIndex] = useState<number | null>(null);
 
   const abortRef = useRef<{ cancelled: boolean }>({
     cancelled: false,
@@ -155,22 +171,43 @@ export default function AdminSensorReadingScreen() {
     setIsReadingStep(false);
     setStatusMessage('Select a farmer to begin.');
     setIsInitialLoad(false);
-    setLastSpotResult(null);
+    setSpotResult(null);
+    setSpotIndex(null);
     abortRef.current.cancelled = false;
     return () => {
       abortRef.current.cancelled = true;
     };
   }, []);
 
+  // Small helpers to format display like stakeholder
+  const fmt = (v: any) => {
+    if (v === null || v === undefined) return '0';
+    const n = Number(v);
+    return Number.isFinite(n) ? String(n) : '0';
+  };
+  const fmtPh = (v: any) => {
+    if (v === null || v === undefined) return '0.00';
+    const n = Number(v);
+    return Number.isFinite(n) ? n.toFixed(2) : '0.00';
+  };
+
+  const spotLevelN = spotResult?.levels?.n ?? classifyLevel(spotResult?.n);
+  const spotLevelP = spotResult?.levels?.p ?? classifyLevel(spotResult?.p);
+  const spotLevelK = spotResult?.levels?.k ?? classifyLevel(spotResult?.k);
+
   // ---------- ESP32 read helpers ----------
   const readOnce = useCallback(async (): Promise<NpkJson | null> => {
     try {
       const data = await readNpkFromESP32();
-      if (data && typeof data === 'object' && 'ok' in data) {
+      if (!data || typeof data !== 'object') {
+        console.warn('readOnce received invalid data:', data);
+        return null;
+      }
+      if ((data as any).ok === false) {
+        console.warn('ESP32 responded with ok=false:', data);
         return data as NpkJson;
       }
-      console.warn('readOnce received invalid data:', data);
-      return null;
+      return data as NpkJson;
     } catch (e: any) {
       console.error('Error in readOnce:', e);
       return null;
@@ -246,111 +283,114 @@ export default function AdminSensorReadingScreen() {
     ]
   );
 
-  const handleReadNextStep = useCallback(async () => {
-    if (!selectedFarmerId) {
-      Alert.alert(
-        'Select Farmer',
-        'Please choose a farmer before reading.'
+  const handleReadNextStep = useCallback(
+    async () => {
+      if (!selectedFarmerId) {
+        Alert.alert(
+          'Select Farmer',
+          'Please choose a farmer before reading.'
+        );
+        return;
+      }
+      if (
+        isReadingStep ||
+        currentStep > TOTAL_STEPS ||
+        currentStep === 0
+      )
+        return;
+      if (abortRef.current.cancelled) return;
+
+      setIsReadingStep(true);
+      const stepToRead = currentStep;
+
+      // Clear previous spot result when starting a new read
+      setSpotResult(null);
+      setSpotIndex(null);
+
+      setStatusMessage(
+        `📍 ${stepToRead}/${TOTAL_STEPS} - Reading soil...`
       );
-      return;
-    }
-    if (
-      isReadingStep ||
-      currentStep > TOTAL_STEPS ||
-      currentStep === 0
-    )
-      return;
-    if (abortRef.current.cancelled) return;
 
-    setIsReadingStep(true);
-    const stepToRead = currentStep;
+      const startTime = Date.now();
 
-    // Clear last result when starting a new read
-    setLastSpotResult(null);
-
-    setStatusMessage(
-      `📍 ${stepToRead}/${TOTAL_STEPS} - Reading soil...`
-    );
-
-    // ⏳ Simulate longer sensor reading time (3.5s)
-    await new Promise((r) => setTimeout(r, 3500));
-    if (abortRef.current.cancelled) {
-      setIsReadingStep(false);
-      return;
-    }
-
-    let data: NpkJson | null = null;
-    for (let attempt = 1; attempt <= 2 && !data; attempt++) {
+      let data: NpkJson | null = null;
+      for (let attempt = 1; attempt <= 2 && !data; attempt++) {
+        if (abortRef.current.cancelled) {
+          setIsReadingStep(false);
+          return;
+        }
+        data = await readOnce();
+        if (!data) await new Promise((r) => setTimeout(r, 600));
+      }
       if (abortRef.current.cancelled) {
         setIsReadingStep(false);
         return;
       }
-      data = await readOnce();
-      if (!data) await new Promise((r) => setTimeout(r, 600));
-    }
-    if (abortRef.current.cancelled) {
-      setIsReadingStep(false);
-      return;
-    }
 
-    if (!data) {
-      setIsReadingStep(false);
-      setStatusMessage(
-        `Failed read ${stepToRead}. Press button to try again.`
-      );
-      Alert.alert('No Data', 'Walang nabasang data. Subukan ulit.');
-      return;
-    }
-    if (
-      typeof data.n !== 'number' ||
-      typeof data.p !== 'number' ||
-      typeof data.k !== 'number'
-    ) {
-      setIsReadingStep(false);
-      setStatusMessage(
-        `Invalid data ${stepToRead}. Press button to try again.`
-      );
-      Alert.alert(
-        'Invalid Data',
-        `Incomplete NPK at spot ${stepToRead}.`
-      );
-      return;
-    }
+      // Enforce minimum reading duration (same as stakeholder)
+      const elapsed = Date.now() - startTime;
+      if (elapsed < MIN_READING_DURATION_MS) {
+        await new Promise((r) =>
+          setTimeout(r, MIN_READING_DURATION_MS - elapsed)
+        );
+        if (abortRef.current.cancelled) {
+          setIsReadingStep(false);
+          return;
+        }
+      }
 
-    // Save last spot result to show under status text
-    setLastSpotResult({
-      step: stepToRead,
-      n: data.n!,
-      p: data.p!,
-      k: data.k!,
-      ph:
-        typeof data.ph === 'number'
-          ? data.ph
-          : undefined,
-    });
+      if (!data) {
+        setIsReadingStep(false);
+        setStatusMessage(
+          `Failed read ${stepToRead}. Press button to try again.`
+        );
+        Alert.alert('No Data', 'Walang nabasang data. Subukan ulit.');
+        return;
+      }
+      if (
+        typeof data.n !== 'number' ||
+        typeof data.p !== 'number' ||
+        typeof data.k !== 'number'
+      ) {
+        setIsReadingStep(false);
+        setStatusMessage(
+          `Invalid data ${stepToRead}. Press button to try again.`
+        );
+        Alert.alert(
+          'Invalid Data',
+          `Incomplete NPK at spot ${stepToRead}.`
+        );
+        return;
+      }
 
-    const newReadings = [...readings, data];
-    setReadings(newReadings);
-    const nextStep = stepToRead + 1;
+      // Save spot result + index for display (like stakeholder)
+      setSpotResult(data);
+      setSpotIndex(stepToRead);
 
-    if (nextStep > TOTAL_STEPS) {
-      setIsReadingStep(false);
-      processResultsAndNavigate(newReadings);
-    } else {
-      setCurrentStep(nextStep);
-      setStatusMessage(
-        `Read ${stepToRead}/${TOTAL_STEPS} OK. Press for spot ${nextStep}.`
-      );
-      setIsReadingStep(false);
-    }
-  }, [
-    selectedFarmerId,
-    isReadingStep,
-    currentStep,
-    readOnce,
-    readings,
-    processResultsAndNavigate,
-  ]);
+      const newReadings = [...readings, data];
+      setReadings(newReadings);
+      const nextStep = stepToRead + 1;
+
+      if (nextStep > TOTAL_STEPS) {
+        setIsReadingStep(false);
+        processResultsAndNavigate(newReadings);
+      } else {
+        setCurrentStep(nextStep);
+        setStatusMessage(
+          `Read ${stepToRead}/${TOTAL_STEPS} OK. Press for spot ${nextStep}.`
+        );
+        setIsReadingStep(false);
+      }
+    },
+    [
+      selectedFarmerId,
+      isReadingStep,
+      currentStep,
+      readOnce,
+      readings,
+      processResultsAndNavigate,
+    ]
+  );
 
   const handleStart = async () => {
     if (!selectedFarmerId) {
@@ -393,22 +433,20 @@ export default function AdminSensorReadingScreen() {
     }
   };
 
-  // ---------- Circle label ----------
-  const circleLabel = (() => {
-    if (!selectedFarmerId) return 'Select\nFarmer';
-    if (currentStep === 0 && (isReadingStep || isInitialLoad))
-      return 'Connecting\n...';
-    if (currentStep === 0) return 'Ready';
-    if (currentStep > TOTAL_STEPS) return 'Done';
-    return `${currentStep}/${TOTAL_STEPS}`;
-  })();
+  const displayedStep =
+    currentStep === 0
+      ? 0
+      : currentStep > TOTAL_STEPS
+      ? TOTAL_STEPS
+      : currentStep;
 
   // ---------- UI ----------
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.safe}>
       <ScrollView
         contentContainerStyle={styles.scrollContent}
         keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
       >
         <Image
           source={require('../../../assets/images/fertisense-logo.png')}
@@ -439,7 +477,7 @@ export default function AdminSensorReadingScreen() {
           </View>
         </View>
 
-        {/* Reading box */}
+        {/* Reading box – now very close to stakeholder design */}
         <View style={styles.readingBox}>
           <Text style={styles.title}>Insert Sensor into Soil</Text>
           <Text style={styles.engSub}>
@@ -451,47 +489,57 @@ export default function AdminSensorReadingScreen() {
             kada spot.
           </Text>
 
-          <View style={styles.circleWrapper}>
-            <View style={styles.circleOuter}>
-              <View style={styles.circleInner}>
-                {(isReadingStep || isInitialLoad) && (
+          <View style={styles.statusDisplay}>
+            <View style={styles.progressCircle}>
+              <View style={styles.progressInner}>
+                {isReadingStep || isInitialLoad ? (
                   <ActivityIndicator
-                    size="large"
+                    size="small"
                     color="#2e7d32"
-                    style={{ marginBottom: 4 }}
+                    style={styles.circleSpinner}
+                  />
+                ) : (
+                  <Ionicons
+                    name="leaf-outline"
+                    size={24}
+                    color="#2e7d32"
+                    style={styles.circleSpinner}
                   />
                 )}
-                <Text style={styles.circleText}>{circleLabel}</Text>
+                <Text style={styles.progressLabel}>Spot</Text>
+                <Text style={styles.progressStep}>
+                  {displayedStep} / {TOTAL_STEPS}
+                </Text>
               </View>
             </View>
-          </View>
 
-          <View style={styles.statusDisplay}>
-            {currentStep >= 0 &&
-              currentStep <= TOTAL_STEPS + 1 && (
-                <Text style={styles.statusText}>
-                  {statusMessage}
-                </Text>
-              )}
-          </View>
+            <Text style={styles.statusText}>{statusMessage}</Text>
 
-          {/* 👇 Last spot result shown under status */}
-          {lastSpotResult && (
-            <View style={styles.lastResultBox}>
-              <Text style={styles.lastResultTitle}>
-                Spot {lastSpotResult.step} result
-              </Text>
-              <Text style={styles.lastResultText}>
-                N: {lastSpotResult.n} | P: {lastSpotResult.p} | K:{' '}
-                {lastSpotResult.k}
-              </Text>
-              {typeof lastSpotResult.ph === 'number' && (
-                <Text style={styles.lastResultText}>
-                  pH: {lastSpotResult.ph}
+            {/* 👇 Spot result + LOW/MEDIUM/HIGH like stakeholder */}
+            {spotResult && spotIndex !== null && (
+              <View style={styles.spotResultBox}>
+                <Text style={styles.spotResultTitle}>
+                  Result for Spot {spotIndex}
                 </Text>
-              )}
-            </View>
-          )}
+                <Text style={styles.spotResultLine}>
+                  🌿 Nitrogen N: {fmt(spotResult.n)}
+                </Text>
+                <Text style={styles.spotResultLine}>
+                  🌱 Phosporus P: {fmt(spotResult.p)}
+                </Text>
+                <Text style={styles.spotResultLine}>
+                  🥬 Potassium K: {fmt(spotResult.k)}
+                </Text>
+                <Text style={styles.spotResultLine}>
+                  💧 pH: {fmtPh(spotResult.ph)}
+                </Text>
+                <Text style={styles.spotResultLine}>
+                  📊 Level – N: {spotLevelN}   P: {spotLevelP}   K:{' '}
+                  {spotLevelK}
+                </Text>
+              </View>
+            )}
+          </View>
         </View>
 
         <View style={styles.buttonContainer}>
@@ -634,21 +682,27 @@ export default function AdminSensorReadingScreen() {
           </View>
         </View>
       </Modal>
-    </View>
+    </SafeAreaView>
   );
 }
 
 // ---------- Styles ----------
 const styles = StyleSheet.create({
+  safe: {
+    flex: 1,
+    backgroundColor: '#fff',
+  },
   container: {
     flex: 1,
     backgroundColor: '#fff',
   },
   scrollContent: {
+    flexGrow: 1,
     paddingTop: 32,
     paddingHorizontal: 24,
     paddingBottom: 24,
     alignItems: 'center',
+    backgroundColor: '#fff',
   },
   logo: {
     width: 180,
@@ -725,70 +779,76 @@ const styles = StyleSheet.create({
     marginBottom: 18,
   },
 
-  circleWrapper: {
-    marginBottom: 16,
-    marginTop: 4,
-  },
-  circleOuter: {
-    width: 150,
-    height: 150,
-    borderRadius: 75,
-    borderWidth: 10,
-    borderColor: '#2e7d32',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#e8f5e9',
-  },
-  circleInner: {
-    width: 110,
-    height: 110,
-    borderRadius: 55,
-    backgroundColor: '#ffffff',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  circleText: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: '#2e7d32',
-    textAlign: 'center',
-  },
-
   statusDisplay: {
-    minHeight: 60,
     alignItems: 'center',
     justifyContent: 'center',
     width: '100%',
     marginTop: 4,
   },
+
+  progressCircle: {
+    width: 150,
+    height: 150,
+    borderRadius: 75,
+    borderWidth: 8,
+    borderColor: '#2e7d32',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 12,
+    backgroundColor: '#ffffff',
+  },
+  progressInner: {
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    backgroundColor: '#e9f7ec',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  circleSpinner: {
+    marginBottom: 4,
+  },
+  progressLabel: {
+    fontSize: 14,
+    color: '#2e7d32',
+    fontWeight: '600',
+  },
+  progressStep: {
+    fontSize: 18,
+    color: '#1b5e20',
+    fontWeight: '800',
+    marginTop: 2,
+  },
+
   statusText: {
-    fontSize: 15,
+    fontSize: 16,
     color: '#2e7d32',
     fontWeight: '600',
     textAlign: 'center',
     marginTop: 5,
   },
 
-  // New styles for last spot result
-  lastResultBox: {
+  // Spot result like stakeholder
+  spotResultBox: {
     marginTop: 10,
-    paddingHorizontal: 12,
     paddingVertical: 8,
+    paddingHorizontal: 14,
     borderRadius: 10,
-    backgroundColor: '#e8f5e9',
-    width: '100%',
+    backgroundColor: '#ffffff',
+    borderWidth: 1,
+    borderColor: '#cde9cf',
+    width: '90%',
   },
-  lastResultTitle: {
-    fontSize: 14,
+  spotResultTitle: {
     fontWeight: '700',
     color: '#1b5e20',
     marginBottom: 4,
     textAlign: 'center',
   },
-  lastResultText: {
-    fontSize: 13,
-    color: '#2e7d32',
-    textAlign: 'center',
+  spotResultLine: {
+    fontSize: 14,
+    color: '#1b5e20',
+    marginTop: 2,
   },
 
   buttonContainer: {

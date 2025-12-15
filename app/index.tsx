@@ -47,7 +47,7 @@ export default function SplashScreen() {
 
 const styles = StyleSheet.create({
   container:{flex:1,backgroundColor:'#ffffff',alignItems:'center',justifyContent:'center',paddingHorizontal:24},
-  logo:{width:350,height:250,marginBottom:-20,marginTop:-60},
+  logo:{width:150,height:250,marginBottom:-20,marginTop:-100},
   tagline:{fontSize:22,fontStyle:'italic',fontWeight:'bold',textAlign:'center',color:'#111',marginBottom:0,lineHeight:24},
   dividerLine:{width:'90%',height:1,backgroundColor:'#ccc',marginVertical:17},
   englishTagline:{fontSize:16,fontWeight:'bold',color:'#333',textAlign:'center',marginBottom:100},

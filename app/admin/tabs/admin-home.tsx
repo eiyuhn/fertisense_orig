@@ -106,6 +106,9 @@ export default function AdminHomeScreen() {
           )}
         </TouchableOpacity>
 
+        
+
+
         <Text style={styles.headerText}>Welcome,</Text>
         <Text style={styles.boldHeaderText}>{user?.name || 'Admin'}!</Text>
         <Text style={styles.dateText}>{getFormattedDate()}</Text>
@@ -121,15 +124,27 @@ export default function AdminHomeScreen() {
           </Text>
         </View>
 
-        {/* View Logs button below, left-aligned */}
-        <TouchableOpacity
-          style={styles.viewLogsButton}
-          onPress={() => router.push('/admin/tabs/logs')}
-          activeOpacity={0.9}
-        >
-          <Ionicons name="list-outline" size={16} color="#fff" style={styles.manageIcon} />
-          <Text style={styles.viewLogsText}>View Logs</Text>
-        </TouchableOpacity>
+        {/* View Logs + View Stakeholders (side by side) */}
+<View style={styles.quickButtonsRow}>
+  <TouchableOpacity
+    style={styles.viewLogsButton}
+    onPress={() => router.push('/admin/tabs/logs')}
+    activeOpacity={0.9}
+  >
+    <Ionicons name="list-outline" size={16} color="#fff" style={styles.manageIcon} />
+    <Text style={styles.viewLogsText}>View Logs</Text>
+  </TouchableOpacity>
+
+  <TouchableOpacity
+    style={styles.viewStakeholdersButton}
+    onPress={() => router.push('/admin/tabs/view-stakeholders')}
+    activeOpacity={0.9}
+  >
+    <Ionicons name="people-outline" size={16} color="#fff" style={styles.manageIcon} />
+    <Text style={styles.viewLogsText}>Stakeholders</Text>
+  </TouchableOpacity>
+</View>
+
 
         <View style={styles.divider} />
 
@@ -284,6 +299,34 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginRight: 14,
   },
+
+      quickButtonsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10, // if your RN version doesn't support gap, I’ll give alternative below
+    marginTop: 2,
+    marginBottom: 6,
+  },
+
+  viewStakeholdersButton: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#2e7d32',
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 30,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: 140,
+    elevation: 2,
+
+  },
+  manageText: {
+    color: '#fff',
+    fontWeight: 'bold',
+    fontSize: 15,
+  },
+
   sensorImage: { width: 100, height: 100, borderRadius: 10, resizeMode: 'cover' },
   farmerImage: { width: 120, height: 95, borderRadius: 10, resizeMode: 'cover' },
   priceImage: { width: 110, height: 72, borderRadius: 10, resizeMode: 'cover' },

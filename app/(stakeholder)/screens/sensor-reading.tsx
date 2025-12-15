@@ -8,9 +8,11 @@ import {
   Text,
   TouchableOpacity,
   View,
+  ScrollView,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 import {
   autoConnectToESP32,
@@ -24,9 +26,9 @@ import { addStandaloneReading } from '../../../src/services';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 type Levels = {
-  n?: 'LOW' | 'MEDIUM' | 'HIGH' | string;
-  p?: 'LOW' | 'MEDIUM' | 'HIGH' | string;
-  k?: 'LOW' | 'MEDIUM' | 'HIGH' | string;
+  n?: 'LOW' | 'MEDIUM' | 'HIGH' | 'N/A' | string;
+  p?: 'LOW' | 'MEDIUM' | 'HIGH' | 'N/A' | string;
+  k?: 'LOW' | 'MEDIUM' | 'HIGH' | 'N/A' | string;
 };
 
 type NpkJson = {
@@ -41,22 +43,42 @@ type NpkJson = {
   p_kg_ha?: number;
   k_kg_ha?: number;
   error?: string;
-  // From ESP32 firmware (if present)
-  levels?: Levels;
+  levels?: Levels; // optional if ESP32 sends it
 };
 
 const TOTAL_STEPS = 10;
-// minimum time for each spot reading so spinner does a “full circle”
-const MIN_READING_DURATION_MS = 3500; // 3.5 seconds
+const MIN_READING_DURATION_MS = 3500; // 3.5 s
 
-// LOW:    0–117
-// MEDIUM: 118–235
-// HIGH:   236+
-const classifyLevel = (v?: number): 'LOW' | 'MEDIUM' | 'HIGH' | 'N/A' => {
+type Nutrient = 'N' | 'P' | 'K';
+
+// ✅ DA-style thresholds (sensor-based interpretation)
+const classifyLevel = (
+  nutrient: Nutrient,
+  v?: number
+): 'LOW' | 'MEDIUM' | 'HIGH' | 'N/A' => {
   if (typeof v !== 'number' || !Number.isFinite(v)) return 'N/A';
-  if (v <= 117) return 'LOW';
-  if (v <= 235) return 'MEDIUM';
-  return 'HIGH';
+
+  const ppm = Math.round(v);
+
+  // if sensor returns 0 (common when not inserted / error), show N/A (or LOW if you want)
+  if (ppm <= 0) return 'N/A';
+
+  if (nutrient === 'N') {
+    if (ppm <= 100) return 'LOW';
+    if (ppm <= 200) return 'MEDIUM';
+    return 'HIGH'; // >= 201
+  }
+
+  if (nutrient === 'P') {
+    if (ppm <= 110) return 'LOW';
+    if (ppm <= 200) return 'MEDIUM';
+    return 'HIGH'; // >= 201
+  }
+
+  // nutrient === 'K'
+  if (ppm <= 117) return 'LOW';
+  if (ppm <= 275) return 'MEDIUM';
+  return 'HIGH'; // >= 276
 };
 
 export default function SensorReadingScreen() {
@@ -69,11 +91,8 @@ export default function SensorReadingScreen() {
   const [currentStep, setCurrentStep] = useState(0);
   const [readings, setReadings] = useState<NpkJson[]>([]);
   const [isReadingStep, setIsReadingStep] = useState(false);
-  const [statusMessage, setStatusMessage] = useState<string>(
-    'Press Start to begin.'
-  );
+  const [statusMessage, setStatusMessage] = useState('Pislita ang Start para magsugod.');
 
-  // per-spot display
   const [spotResult, setSpotResult] = useState<NpkJson | null>(null);
   const [spotIndex, setSpotIndex] = useState<number | null>(null);
 
@@ -83,7 +102,7 @@ export default function SensorReadingScreen() {
     setCurrentStep(0);
     setReadings([]);
     setIsReadingStep(false);
-    setStatusMessage('Press Start to begin.');
+    setStatusMessage('Pislita ang Start para magsugod.');
     setSpotResult(null);
     setSpotIndex(null);
     abortRef.current.cancelled = false;
@@ -93,51 +112,39 @@ export default function SensorReadingScreen() {
     };
   }, []);
 
-  // 🔧 FIXED: show real ESP32 / network errors instead of always null
   const readOnce = useCallback(async (): Promise<NpkJson | null> => {
     try {
       console.log('[SensorReading] calling readNpkFromESP32()...');
       const data = await readNpkFromESP32();
-
       console.log('[SensorReading] raw ESP32 data:', data);
 
       if (!data || typeof data !== 'object') {
         Alert.alert(
-          'Invalid Response',
-          'ESP32 returned an invalid response (not a JSON object).'
+          'Dili Sakto ang Tubag',
+          'Ang ESP32 naghatag ug dili sakto nga tubag (dili siya JSON object).'
         );
         return null;
       }
 
-      // If firmware sends { ok:false, error:"..." }
       if ((data as any).ok === false) {
         const errMsg =
-          (data as any).error || 'ESP32 responded with ok=false (sensor error).';
-        Alert.alert('Sensor Error', errMsg);
+          (data as any).error || 'Ang ESP32 nitubag ug ok=false (naay problema sa sensor).';
+        Alert.alert('Error sa Sensor', errMsg);
         return null;
       }
 
-      // Expect n, p, k as numbers
       const { n, p, k } = data as any;
-      if (
-        typeof n !== 'number' ||
-        typeof p !== 'number' ||
-        typeof k !== 'number'
-      ) {
-        Alert.alert(
-          'Invalid Data',
-          'ESP32 did not return numeric NPK values.'
-        );
+      if (typeof n !== 'number' || typeof p !== 'number' || typeof k !== 'number') {
+        Alert.alert('Dili Sakto ang Data', 'Wala nibalik ug numero nga NPK values ang ESP32.');
         return null;
       }
 
-      // Valid reading
       return data as NpkJson;
     } catch (e: any) {
       console.error('[SensorReading] readOnce error:', e);
       Alert.alert(
-        'Read Error',
-        e?.message || 'Could not read from ESP32 (network or sensor error).'
+        'Error sa Pagbasa',
+        e?.message || 'Dili mabasa gikan sa ESP32 (network o sensor error).'
       );
       return null;
     }
@@ -147,25 +154,15 @@ export default function SensorReadingScreen() {
     async (allReadings: NpkJson[]) => {
       if (abortRef.current.cancelled) return;
       setCurrentStep(TOTAL_STEPS + 1);
-      setStatusMessage('Calculating average...');
+      setStatusMessage('Gikuwenta ang average...');
 
-      const Ns = allReadings
-        .map((r) => r.n)
-        .filter((n) => typeof n === 'number') as number[];
-      const Ps = allReadings
-        .map((r) => r.p)
-        .filter((n) => typeof n === 'number') as number[];
-      const Ks = allReadings
-        .map((r) => r.k)
-        .filter((n) => typeof n === 'number') as number[];
-      const pHs = allReadings
-        .map((r) => r.ph)
-        .filter((n) => typeof n === 'number') as number[];
+      const Ns = allReadings.map((r) => r.n).filter((n) => typeof n === 'number') as number[];
+      const Ps = allReadings.map((r) => r.p).filter((n) => typeof n === 'number') as number[];
+      const Ks = allReadings.map((r) => r.k).filter((n) => typeof n === 'number') as number[];
+      const pHs = allReadings.map((r) => r.ph).filter((n) => typeof n === 'number') as number[];
 
       const avg = (arr: number[]) =>
-        arr.length
-          ? Math.round((arr.reduce((a, b) => a + b, 0) / arr.length) * 10) / 10
-          : 0;
+        arr.length ? Math.round((arr.reduce((a, b) => a + b, 0) / arr.length) * 10) / 10 : 0;
 
       const avgN = avg(Ns);
       const avgP = avg(Ps);
@@ -185,10 +182,8 @@ export default function SensorReadingScreen() {
         readings: allReadings,
       };
 
-      // 1) store in DataContext
       setLatestSensorData(finalResult);
 
-      // 2) cache last reading per stakeholder user
       try {
         if (user?._id) {
           const key = `stakeholder:lastReading:${user._id}`;
@@ -202,13 +197,9 @@ export default function SensorReadingScreen() {
           await AsyncStorage.setItem(key, JSON.stringify(payload));
         }
       } catch (e) {
-        console.warn(
-          '[SensorReading] failed to cache stakeholder last reading:',
-          e
-        );
+        console.warn('[SensorReading] failed to cache stakeholder last reading:', e);
       }
 
-      // 3) push into ReadingSessionContext
       try {
         await setFromParams({
           n: avgN,
@@ -222,7 +213,6 @@ export default function SensorReadingScreen() {
         console.warn('[SensorReading] failed to set reading session:', e);
       }
 
-      // 4) optional: send as standalone stakeholder reading to backend
       try {
         if (token) {
           await addStandaloneReading(
@@ -240,7 +230,6 @@ export default function SensorReadingScreen() {
         console.warn('[SensorReading] failed to push standalone reading:', e);
       }
 
-      // Small pause before navigation
       await new Promise((r) => setTimeout(r, 1000));
       if (abortRef.current.cancelled) return;
 
@@ -255,297 +244,245 @@ export default function SensorReadingScreen() {
         },
       });
     },
-    [
-      farmerId,
-      router,
-      setFromParams,
-      setLatestSensorData,
-      token,
-      user?._id,
-    ]
+    [farmerId, router, setFromParams, setLatestSensorData, token, user?._id]
   );
 
-  const handleReadNextStep = useCallback(
-    async () => {
-      if (isReadingStep || currentStep > TOTAL_STEPS || currentStep === 0)
-        return;
-      if (abortRef.current.cancelled) return;
+  const handleReadNextStep = useCallback(async () => {
+    if (isReadingStep || currentStep > TOTAL_STEPS || currentStep === 0) return;
+    if (abortRef.current.cancelled) return;
 
-      // clear previous spot result when starting a new spot
-      setSpotResult(null);
-      setSpotIndex(null);
+    setSpotResult(null);
+    setSpotIndex(null);
 
-      setIsReadingStep(true);
-      const stepToRead = currentStep;
-      const startTime = Date.now();
-      setStatusMessage(`${stepToRead}/${TOTAL_STEPS} - Reading soil...`);
+    setIsReadingStep(true);
+    const stepToRead = currentStep;
+    const startTime = Date.now();
+    setStatusMessage(`${stepToRead}/${TOTAL_STEPS} - Nagbasa sa yuta...`);
 
-      let data: NpkJson | null = null;
-      for (let attempt = 1; attempt <= 2 && !data; attempt++) {
-        if (abortRef.current.cancelled) {
-          setIsReadingStep(false);
-          return;
-        }
-        data = await readOnce();
-        if (!data) await new Promise((r) => setTimeout(r, 600));
-      }
+    let data: NpkJson | null = null;
+    for (let attempt = 1; attempt <= 2 && !data; attempt++) {
       if (abortRef.current.cancelled) {
         setIsReadingStep(false);
         return;
       }
+      data = await readOnce();
+      if (!data) await new Promise((r) => setTimeout(r, 600));
+    }
 
-      // ensure spinner runs at least MIN_READING_DURATION_MS
-      const elapsed = Date.now() - startTime;
-      if (elapsed < MIN_READING_DURATION_MS) {
-        await new Promise((r) =>
-          setTimeout(r, MIN_READING_DURATION_MS - elapsed)
-        );
-        if (abortRef.current.cancelled) {
-          setIsReadingStep(false);
-          return;
-        }
-      }
+    if (abortRef.current.cancelled) {
+      setIsReadingStep(false);
+      return;
+    }
 
-      if (!data) {
+    const elapsed = Date.now() - startTime;
+    if (elapsed < MIN_READING_DURATION_MS) {
+      await new Promise((r) => setTimeout(r, MIN_READING_DURATION_MS - elapsed));
+      if (abortRef.current.cancelled) {
         setIsReadingStep(false);
-        setStatusMessage(
-          `Failed read ${stepToRead}. Press button to try again.`
-        );
-        Alert.alert(
-          'Walang nabasang data',
-          'Hindi nakakuha ng reading. Subukan ilapit ang phone at ulitin.'
-        );
         return;
       }
-      if (
-        typeof data.n !== 'number' ||
-        typeof data.p !== 'number' ||
-        typeof data.k !== 'number'
-      ) {
-        setIsReadingStep(false);
-        setStatusMessage(
-          `Invalid data ${stepToRead}. Press button to try again.`
-        );
-        Alert.alert('Invalid Data', `Incomplete NPK at spot ${stepToRead}.`);
-        return;
-      }
+    }
 
-      // show this spot's result under the status text
-      setSpotResult(data);
-      setSpotIndex(stepToRead);
+    if (!data) {
+      setIsReadingStep(false);
+      setStatusMessage(`Napakyas ang pagbasa sa ${stepToRead}. Pislita para mosulay balik.`);
+      Alert.alert(
+        'Walay nabasang data',
+        'Wala mi nakakuha ug reading. Duola ang phone ug sulayi pag-usab.'
+      );
+      return;
+    }
 
-      const newReadings = [...readings, data];
-      setReadings(newReadings);
-      const nextStep = stepToRead + 1;
+    if (typeof data.n !== 'number' || typeof data.p !== 'number' || typeof data.k !== 'number') {
+      setIsReadingStep(false);
+      setStatusMessage(`Dili sakto ang data sa ${stepToRead}. Pislita para mosulay balik.`);
+      Alert.alert('Dili Sakto ang Data', `Kulangan ang NPK sa spot ${stepToRead}.`);
+      return;
+    }
 
-      if (nextStep > TOTAL_STEPS) {
-        setIsReadingStep(false);
-        processResultsAndNavigate(newReadings);
-      } else {
-        setCurrentStep(nextStep);
-        setStatusMessage(
-          `Read ${stepToRead}/${TOTAL_STEPS} OK. Press for spot ${nextStep}.`
-        );
-        setIsReadingStep(false);
-      }
-    },
-    [currentStep, isReadingStep, readOnce, readings, processResultsAndNavigate]
-  );
+    setSpotResult(data);
+    setSpotIndex(stepToRead);
+
+    const newReadings = [...readings, data];
+    setReadings(newReadings);
+
+    const nextStep = stepToRead + 1;
+    if (nextStep > TOTAL_STEPS) {
+      setIsReadingStep(false);
+      processResultsAndNavigate(newReadings);
+    } else {
+      setCurrentStep(nextStep);
+      setStatusMessage(
+        `OK ang pagbasa ${stepToRead}/${TOTAL_STEPS}. Pinduta para sa spot ${nextStep}.`
+      );
+      setIsReadingStep(false);
+    }
+  }, [currentStep, isReadingStep, readOnce, readings, processResultsAndNavigate]);
 
   const handleStart = async () => {
     if (currentStep !== 0 || isReadingStep) return;
     setIsReadingStep(true);
-    setStatusMessage(`Checking connection to ${ESP_SSID}...`);
+    setStatusMessage(`Gitan-aw ang koneksyon sa ${ESP_SSID}...`);
     try {
       await autoConnectToESP32();
       if (abortRef.current.cancelled) return;
       setCurrentStep(1);
-      setStatusMessage(`Ready to read spot 1/${TOTAL_STEPS}. Press button.`);
+      setStatusMessage(`Andam na para mobasa sa spot 1/${TOTAL_STEPS}. Pislita ang button.`);
     } catch (err: any) {
       if (abortRef.current.cancelled) return;
-      Alert.alert('Connection Error', err.message || `Could not connect.`);
-      setStatusMessage('Connection failed. Try Start again.');
+      Alert.alert('Error sa Koneksyon', err.message || `Dili makakonek.`);
+      setStatusMessage('Nawala ang koneksyon. Sulayi ug Start pag-usab.');
     } finally {
-      if (!abortRef.current.cancelled) {
-        setIsReadingStep(false);
-      }
+      if (!abortRef.current.cancelled) setIsReadingStep(false);
     }
   };
 
   const displayedStep =
-    currentStep === 0
-      ? 0
-      : currentStep > TOTAL_STEPS
-      ? TOTAL_STEPS
-      : currentStep;
+    currentStep === 0 ? 0 : currentStep > TOTAL_STEPS ? TOTAL_STEPS : currentStep;
 
-  // helpers for display
-  const fmt = (v: any) => {
-    if (v === null || v === undefined) return '0';
-    const n = Number(v);
-    return Number.isFinite(n) ? String(n) : '0';
-  };
   const fmtPh = (v: any) => {
     if (v === null || v === undefined) return '0.00';
     const n = Number(v);
     return Number.isFinite(n) ? n.toFixed(2) : '0.00';
   };
 
-  // per-spot NPK levels for UI
-  const spotLevelN =
-    spotResult?.levels?.n ?? classifyLevel(spotResult?.n);
-  const spotLevelP =
-    spotResult?.levels?.p ?? classifyLevel(spotResult?.p);
-  const spotLevelK =
-    spotResult?.levels?.k ?? classifyLevel(spotResult?.k);
+  const spotLevelN = spotResult?.levels?.n ?? classifyLevel('N', spotResult?.n);
+  const spotLevelP = spotResult?.levels?.p ?? classifyLevel('P', spotResult?.p);
+  const spotLevelK = spotResult?.levels?.k ?? classifyLevel('K', spotResult?.k);
 
   return (
-    <View style={styles.container}>
-      <Image
-        source={require('../../../assets/images/fertisense-logo.png')}
-        style={styles.logo}
-      />
-      <View style={styles.readingBox}>
-        <Text style={styles.title}>Insert Sensor into Soil</Text>
-        <Text style={styles.engSub}>
-          Take {TOTAL_STEPS} readings. Press button for each spot.
-        </Text>
-        <Text style={styles.tagalogSub}>
-          Kumuha ng {TOTAL_STEPS} readings. Pindutin ang button kada spot.
-        </Text>
+    <SafeAreaView style={styles.safe}>
+      <ScrollView
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+      >
+        <Image
+          source={require('../../../assets/images/fertisense-logo.png')}
+          style={styles.logo}
+        />
 
-        {/* BIG CIRCULAR LOADER */}
-        <View style={styles.statusDisplay}>
-          <View style={styles.progressCircle}>
-            <View style={styles.progressInner}>
-              {isReadingStep ? (
-                <ActivityIndicator
-                  size="small"
-                  color="#2e7d32"
-                  style={styles.circleSpinner}
-                />
-              ) : (
-                <Ionicons
-                  name="leaf-outline"
-                  size={24}
-                  color="#2e7d32"
-                  style={styles.circleSpinner}
-                />
-              )}
-              <Text style={styles.progressLabel}>Spot</Text>
-              <Text style={styles.progressStep}>
-                {displayedStep} / {TOTAL_STEPS}
-              </Text>
+        <View style={styles.readingBox}>
+          <Text style={styles.title}>Itusok ang Sensor sa Yuta</Text>
+          <Text style={styles.engSub}>
+            Kuhaa ang {TOTAL_STEPS} ka readings. Pinduta ang button kada spot.
+          </Text>
+          
+
+          <View style={styles.statusDisplay}>
+            <View style={styles.progressCircle}>
+              <View style={styles.progressInner}>
+                {isReadingStep ? (
+                  <ActivityIndicator
+                    size="small"
+                    color="#2e7d32"
+                    style={styles.circleSpinner}
+                  />
+                ) : (
+                  <Ionicons
+                    name="leaf-outline"
+                    size={24}
+                    color="#2e7d32"
+                    style={styles.circleSpinner}
+                  />
+                )}
+                <Text style={styles.progressLabel}>Spot</Text>
+                <Text style={styles.progressStep}>
+                  {displayedStep} / {TOTAL_STEPS}
+                </Text>
+              </View>
             </View>
+
+            <Text style={styles.statusText}>{statusMessage}</Text>
+
+            {spotResult && spotIndex !== null && (
+              <View style={styles.spotResultBox}>
+                <Text style={styles.spotResultTitle}>Resulta sa Spot {spotIndex}</Text>
+
+                <Text style={styles.spotResultLine}>Nitrogen (N): {String(spotLevelN)}</Text>
+                <Text style={styles.spotResultLine}>Posporus (P): {String(spotLevelP)}</Text>
+                <Text style={styles.spotResultLine}>Potassium (K): {String(spotLevelK)}</Text>
+
+                <Text style={styles.spotResultLine}>💧 pH: {fmtPh(spotResult.ph)}</Text>
+              </View>
+            )}
           </View>
+        </View>
 
-          <Text style={styles.statusText}>{statusMessage}</Text>
+        <View style={styles.buttonContainer}>
+          {currentStep === 0 && (
+            <TouchableOpacity
+              style={[styles.actionButton, isReadingStep && styles.disabledButton]}
+              onPress={handleStart}
+              disabled={isReadingStep}
+            >
+              <Ionicons
+                name="hardware-chip-outline"
+                size={22}
+                color={isReadingStep ? '#eee' : '#fff'}
+              />
+              <Text
+                style={[
+                  styles.actionButtonText,
+                  isReadingStep && styles.disabledButtonText,
+                ]}
+              >
+                {isReadingStep ? 'Gisusi...' : 'Sugdi ang Pagbasa'}
+              </Text>
+            </TouchableOpacity>
+          )}
 
-          {/* per-spot NPK + pH display */}
-          {spotResult && spotIndex !== null && (
-            <View style={styles.spotResultBox}>
-              <Text style={styles.spotResultTitle}>
-                Result for Spot {spotIndex}
+          {currentStep > 0 && currentStep <= TOTAL_STEPS && (
+            <TouchableOpacity
+              style={[styles.actionButton, isReadingStep && styles.disabledButton]}
+              onPress={handleReadNextStep}
+              disabled={isReadingStep}
+            >
+              <Ionicons
+                name="radio-button-on-outline"
+                size={22}
+                color={isReadingStep ? '#eee' : '#fff'}
+              />
+              <Text
+                style={[
+                  styles.actionButtonText,
+                  isReadingStep && styles.disabledButtonText,
+                ]}
+              >
+                {isReadingStep
+                  ? `Nagbasa sa Spot ${currentStep}...`
+                  : `Basaha ang Spot ${currentStep}/${TOTAL_STEPS}`}
               </Text>
-              <Text style={styles.spotResultLine}>
-                🌿 N: {fmt(spotResult.n)}
+            </TouchableOpacity>
+          )}
+
+          {currentStep > TOTAL_STEPS && (
+            <TouchableOpacity style={[styles.actionButton, styles.disabledButton]} disabled>
+              <ActivityIndicator size="small" color="#eee" style={{ marginRight: 10 }} />
+              <Text style={[styles.actionButtonText, styles.disabledButtonText]}>
+                Ginaproseso...
               </Text>
-              <Text style={styles.spotResultLine}>
-                🌱 P: {fmt(spotResult.p)}
-              </Text>
-              <Text style={styles.spotResultLine}>
-                🥬 K: {fmt(spotResult.k)}
-              </Text>
-              <Text style={styles.spotResultLine}>
-                💧 pH: {fmtPh(spotResult.ph)}
-              </Text>
-              <Text style={styles.spotResultLine}>
-                📊 Level – N: {spotLevelN}   P: {spotLevelP}   K: {spotLevelK}
-              </Text>
-            </View>
+            </TouchableOpacity>
           )}
         </View>
-      </View>
-
-      <View style={styles.buttonContainer}>
-        {currentStep === 0 && (
-          <TouchableOpacity
-            style={[styles.actionButton, isReadingStep && styles.disabledButton]}
-            onPress={handleStart}
-            disabled={isReadingStep}
-          >
-            <Ionicons
-              name="hardware-chip-outline"
-              size={22}
-              color={isReadingStep ? '#eee' : '#fff'}
-            />
-            <Text
-              style={[
-                styles.actionButtonText,
-                isReadingStep && styles.disabledButtonText,
-              ]}
-            >
-              {isReadingStep ? 'Checking...' : 'Start Reading'}
-            </Text>
-          </TouchableOpacity>
-        )}
-
-        {currentStep > 0 && currentStep <= TOTAL_STEPS && (
-          <TouchableOpacity
-            style={[styles.actionButton, isReadingStep && styles.disabledButton]}
-            onPress={handleReadNextStep}
-            disabled={isReadingStep}
-          >
-            <Ionicons
-              name="radio-button-on-outline"
-              size={22}
-              color={isReadingStep ? '#eee' : '#fff'}
-            />
-            <Text
-              style={[
-                styles.actionButtonText,
-                isReadingStep && styles.disabledButtonText,
-              ]}
-            >
-              {isReadingStep
-                ? `Reading Spot ${currentStep}...`
-                : `Read Spot ${currentStep}/${TOTAL_STEPS}`}
-            </Text>
-          </TouchableOpacity>
-        )}
-
-        {currentStep > TOTAL_STEPS && (
-          <TouchableOpacity
-            style={[styles.actionButton, styles.disabledButton]}
-            disabled
-          >
-            <ActivityIndicator
-              size="small"
-              color="#eee"
-              style={{ marginRight: 10 }}
-            />
-            <Text
-              style={[styles.actionButtonText, styles.disabledButtonText]}
-            >
-              Processing...
-            </Text>
-          </TouchableOpacity>
-        )}
-      </View>
-    </View>
+      </ScrollView>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  safe: {
     flex: 1,
     backgroundColor: '#ffffffff',
+  },
+  scrollContent: {
+    flexGrow: 1,
     alignItems: 'center',
     paddingTop: 40,
     paddingHorizontal: 24,
-    justifyContent: 'flex-start',
+    paddingBottom: 32,
+    backgroundColor: '#ffffffff',
   },
-  logo: { width: 200, height: 200, resizeMode: 'contain', marginBottom: -10 },
+  logo: { width: 120, height: 200, resizeMode: 'contain', marginBottom: -10 },
 
   readingBox: {
     backgroundColor: '#f1fbf1',
@@ -643,7 +580,11 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
 
-  buttonContainer: {},
+  buttonContainer: {
+    width: '100%',
+    alignItems: 'center',
+    marginTop: 8,
+  },
   actionButton: {
     backgroundColor: '#2e7d32',
     flexDirection: 'row',

@@ -25,392 +25,719 @@ import { useReadingSession } from '../../../context/ReadingSessionContext';
 import {
   addReading,
   addStandaloneReading,
+  getDaRecommendation,
+  getPublicPrices, // ✅ IMPORTANT: use public prices, not admin route
+  type DaRecommendResponse,
+  type AdminPricesDoc,
 } from '../../../src/services';
 
 const SACK_WEIGHT_KG = 50;
 
-// ------------- classification thresholds (ppm) -------------
-const classifyLevel = (ppm: number): 'LOW' | 'MEDIUM' | 'HIGH' => {
-  if (ppm < 117) return 'LOW';     // 0–116.9
-  if (ppm <= 235) return 'MEDIUM'; // 117–235
-  return 'HIGH';                   // >235
-};
+type Nutrient = 'N' | 'P' | 'K';
 
-// ------------- helpers for prices / labels -------------
-const priceOf = (
-  prices: Record<string, any> | null | undefined,
-  code: string | null | undefined
-) => (code && prices?.[code]?.pricePerBag) ?? 0;
+// ---------- helpers ----------
+// ✅ DA-style thresholds (sensor-based interpretation)
+const classifyLevel = (nutrient: Nutrient, ppm: number): 'LOW' | 'MEDIUM' | 'HIGH' => {
+  const v = Number(ppm);
+  if (!Number.isFinite(v) || v <= 0) return 'LOW';
 
-const labelOf = (
-  prices: Record<string, any> | null | undefined,
-  code: string | null | undefined
-) => {
-  if (!code) return 'Unknown';
-  return prices?.[code]?.label ?? code;
-};
+  const x = Math.round(v);
 
-// find fertilizer code automatically by looking at label + code text
-const findFertCode = (
-  prices: Record<string, any> | null | undefined,
-  patterns: string[]
-): string | null => {
-  if (!prices) return null;
-  const entries = Object.entries(prices);
-  const lowerPatterns = patterns.map(p => p.toLowerCase());
-
-  for (const [code, item] of entries) {
-    const haystack = `${code} ${item?.label ?? ''}`.toLowerCase();
-    if (lowerPatterns.some(p => haystack.includes(p))) {
-      return code;
-    }
+  if (nutrient === 'N') {
+    if (x <= 100) return 'LOW';
+    if (x <= 200) return 'MEDIUM';
+    return 'HIGH';
   }
-  return null;
+
+  if (nutrient === 'P') {
+    if (x <= 110) return 'LOW';
+    if (x <= 200) return 'MEDIUM';
+    return 'HIGH';
+  }
+
+  // K
+  if (x <= 117) return 'LOW';
+  if (x <= 275) return 'MEDIUM';
+  return 'HIGH';
+};
+
+const toLMH = (lvl: 'LOW' | 'MEDIUM' | 'HIGH'): 'L' | 'M' | 'H' => {
+  if (lvl === 'LOW') return 'L';
+  if (lvl === 'MEDIUM') return 'M';
+  return 'H';
 };
 
 const isObjectId = (s?: string) => !!s && /^[a-f0-9]{24}$/i.test(s);
 
-// ------------- main component -------------
+function bagsFmt(b: number) {
+  const n = Number.isFinite(b) ? b : 0;
+  return `${n.toFixed(2)} bags`;
+}
+
+function moneyFmt(v: number) {
+  return (v || 0).toFixed(2);
+}
+
+function normalizeDetailsFromSchedule(schedule?: any): string[] {
+  if (!schedule) return [];
+  const out: string[] = [];
+
+  const push = (title: string, arr?: any[]) => {
+    if (!Array.isArray(arr) || arr.length === 0) return;
+    out.push(`${title}:`);
+    arr.forEach((x) => {
+      const code = String(x?.code ?? '');
+      const bags = Number(x?.bags ?? 0);
+      const kg = bags * SACK_WEIGHT_KG;
+      out.push(`${code}: ${bags.toFixed(2)} bags (${kg.toFixed(1)} kg)`);
+    });
+  };
+
+  push('Sa Pagtanim', schedule.basal);
+  push('Pagkatapos ng 30 araw', schedule.after30DAT);
+  push('Top Dress', schedule.topdress60DBH);
+
+  return out;
+}
+
+/* =============================
+   ✅ LOCAL FALLBACK (3 plans)
+   ============================= */
+
+// DA nutrient requirement (kg/ha)
+const DA_RICE_HYBRID_REQ = {
+  N: { L: 120, M: 90, H: 60 },
+  P: { L: 60, M: 45, H: 20 },
+  K: { L: 60, M: 45, H: 30 },
+} as const;
+
+type Lmh = 'L' | 'M' | 'H';
+
+type LocalScheduleLine = { code: string; bags: number };
+type LocalSchedule = {
+  organic?: LocalScheduleLine[];
+  basal?: LocalScheduleLine[];
+  after30DAT?: LocalScheduleLine[];
+  topdress60DBH?: LocalScheduleLine[];
+};
+
+type LocalCostRow = {
+  phase: string;
+  code: string;
+  bags: number;
+  pricePerBag: number | null;
+  subtotal: number | null;
+};
+
+type LocalCost = {
+  currency: string;
+  rows: LocalCostRow[];
+  total: number;
+};
+
+type LocalPlan = {
+  id: string;
+  title: string;
+  label: string;
+  isDa?: boolean;
+  isCheapest?: boolean;
+  schedule: LocalSchedule;
+  cost: LocalCost | null;
+};
+
+// ✅ map fertilizer dash code -> backend price key
+const CODE_TO_PRICE_KEY: Record<string, string> = {
+  '46-0-0': 'UREA_46_0_0',
+  '18-46-0': 'DAP_18_46_0',
+  '16-20-0': 'NPK_16_20_0',
+  '0-0-60': 'MOP_0_0_60',
+  '14-14-14': 'NPK_14_14_14',
+  '21-0-0': 'AMMOSUL_21_0_0',
+};
+
+function round2(x: number) {
+  return Math.round((Number(x || 0) + Number.EPSILON) * 100) / 100;
+}
+
+function getItemByCode(prices: AdminPricesDoc | null, dashCode: string) {
+  const key = CODE_TO_PRICE_KEY[String(dashCode)];
+  if (!prices || !key) return null;
+  return (prices as any)?.items?.[key] ?? null;
+}
+
+function nutrientKgPerBag(prices: AdminPricesDoc | null, dashCode: string) {
+  const it = getItemByCode(prices, dashCode);
+  if (!it) return null;
+
+  const bagKg = Number(it.bagKg || 50);
+  const pctN = Number(it.npk?.N || 0);
+  const pctP = Number(it.npk?.P || 0);
+  const pctK = Number(it.npk?.K || 0);
+
+  return {
+    bagKg,
+    N: bagKg * (pctN / 100),
+    P: bagKg * (pctP / 100),
+    K: bagKg * (pctK / 100),
+    pricePerBag: Number(it.pricePerBag || 0),
+  };
+}
+
+function calcCost(schedule: LocalSchedule, prices: AdminPricesDoc | null): LocalCost | null {
+  if (!prices) return null;
+
+  const currency = String((prices as any)?.currency || 'PHP');
+
+  const lines = [
+    ...(schedule.basal || []).map((x) => ({ phase: 'BASAL', ...x })),
+    ...(schedule.after30DAT || []).map((x) => ({ phase: '30 DAT', ...x })),
+    ...(schedule.topdress60DBH || []).map((x) => ({ phase: 'TOPDRESS', ...x })),
+  ];
+
+  const rows: LocalCostRow[] = lines.map((l) => {
+    const item = getItemByCode(prices, l.code);
+    const pricePerBag = item?.pricePerBag ?? null;
+    const subtotal = pricePerBag == null ? null : round2(pricePerBag * Number(l.bags || 0));
+    return {
+      phase: l.phase,
+      code: String(l.code),
+      bags: Number(l.bags || 0),
+      pricePerBag,
+      subtotal,
+    };
+  });
+
+  const total = round2(rows.reduce((s, r) => s + (r.subtotal || 0), 0));
+  return { currency, rows, total };
+}
+
+function buildAltPlan(params: {
+  id: string;
+  label: string;
+  reqKgHa: { N: number; P: number; K: number };
+  prices: AdminPricesDoc | null;
+  areaHa?: number;
+  basalMix: Array<{ code: string; role: 'P' | 'K' | 'PK' }>;
+  nSourceCode: string;
+}): LocalPlan | null {
+  const area = Number(params.areaHa || 1);
+
+  const req = {
+    N: Number(params.reqKgHa.N || 0) * area,
+    P: Number(params.reqKgHa.P || 0) * area,
+    K: Number(params.reqKgHa.K || 0) * area,
+  };
+
+  const checkCodes = [...params.basalMix.map((b) => b.code), params.nSourceCode];
+  for (const c of checkCodes) {
+    const n = nutrientKgPerBag(params.prices, c);
+    if (!n) return null;
+  }
+
+  let supplied = { N: 0, P: 0, K: 0 };
+  const basal: LocalScheduleLine[] = [];
+
+  for (const b of params.basalMix) {
+    const per = nutrientKgPerBag(params.prices, b.code)!;
+
+    let bags = 0;
+    if (b.role === 'P') bags = req.P / (per.P || 1);
+    else if (b.role === 'K') bags = req.K / (per.K || 1);
+    else bags = Math.max(req.P / (per.P || 1), req.K / (per.K || 1));
+
+    bags = round2(bags);
+
+    if (!Number.isFinite(bags) || bags < 0 || bags > 30) return null;
+
+    basal.push({ code: b.code, bags });
+    supplied.N += bags * per.N;
+    supplied.P += bags * per.P;
+    supplied.K += bags * per.K;
+  }
+
+  const nPer = nutrientKgPerBag(params.prices, params.nSourceCode)!;
+  const remainingN = Math.max(0, req.N - supplied.N);
+  let nBagsTotal = remainingN / (nPer.N || 1);
+
+  if (!Number.isFinite(nBagsTotal) || nBagsTotal < 0) nBagsTotal = 0;
+  if (nBagsTotal > 60) return null;
+
+  const after30 = round2(nBagsTotal / 2);
+  const topdress = round2(nBagsTotal / 2);
+
+  const schedule: LocalSchedule = {
+    organic: [],
+    basal,
+    after30DAT: after30 > 0 ? [{ code: params.nSourceCode, bags: after30 }] : [],
+    topdress60DBH: topdress > 0 ? [{ code: params.nSourceCode, bags: topdress }] : [],
+  };
+
+  const cost = calcCost(schedule, params.prices);
+
+  return {
+    id: params.id,
+    title: 'Fertilizer Plan',
+    label: params.label,
+    isDa: false,
+    isCheapest: false,
+    schedule,
+    cost,
+  };
+}
+
+function build3PlansFallback(args: {
+  resp: DaRecommendResponse | null;
+  prices: AdminPricesDoc | null;
+  nClass: Lmh;
+  pClass: Lmh;
+  kClass: Lmh;
+  areaHa?: number;
+}): LocalPlan[] {
+  const area = Number(args.areaHa || 1);
+
+  const reqKgHa = {
+    N: DA_RICE_HYBRID_REQ.N[args.nClass],
+    P: DA_RICE_HYBRID_REQ.P[args.pClass],
+    K: DA_RICE_HYBRID_REQ.K[args.kClass],
+  };
+
+  const daSchedule: LocalSchedule = {
+    organic: [],
+    basal: Array.isArray(args.resp?.schedule?.basal) ? (args.resp!.schedule!.basal as any) : [],
+    after30DAT: Array.isArray(args.resp?.schedule?.after30DAT) ? (args.resp!.schedule!.after30DAT as any) : [],
+    topdress60DBH: Array.isArray(args.resp?.schedule?.topdress60DBH) ? (args.resp!.schedule!.topdress60DBH as any) : [],
+  };
+
+  const daCost: LocalCost | null =
+    args.resp?.cost && typeof args.resp.cost === 'object'
+      ? {
+          currency: String((args.resp.cost as any)?.currency || (args.prices as any)?.currency || 'PHP'),
+          rows: Array.isArray((args.resp.cost as any)?.rows) ? (args.resp.cost as any).rows : [],
+          total: Number((args.resp.cost as any)?.total || 0),
+        }
+      : calcCost(daSchedule, args.prices);
+
+  const daPlan: LocalPlan = {
+    id: 'DA_RULE',
+    title: 'Fertilizer Plan',
+    label: 'DA Recommendation',
+    isDa: true,
+    isCheapest: false,
+    schedule: daSchedule,
+    cost: daCost,
+  };
+
+  const altA = buildAltPlan({
+    id: 'ALT_DAP_MOP_UREA',
+    label: 'Alternative (DAP + MOP + Urea)',
+    reqKgHa,
+    prices: args.prices,
+    areaHa: area,
+    basalMix: [
+      { code: '18-46-0', role: 'P' },
+      { code: '0-0-60', role: 'K' },
+    ],
+    nSourceCode: '46-0-0',
+  });
+
+  const altB = buildAltPlan({
+    id: 'ALT_16_20_0_MOP_AMMOSUL',
+    label: 'Alternative (16-20-0 + MOP + Ammosul)',
+    reqKgHa,
+    prices: args.prices,
+    areaHa: area,
+    basalMix: [
+      { code: '16-20-0', role: 'P' },
+      { code: '0-0-60', role: 'K' },
+    ],
+    nSourceCode: '21-0-0',
+  });
+
+  const raw = [daPlan, altA, altB].filter(Boolean) as LocalPlan[];
+
+  raw.sort((a, b) => {
+    const ta = a.cost?.total ?? Number.POSITIVE_INFINITY;
+    const tb = b.cost?.total ?? Number.POSITIVE_INFINITY;
+    return ta - tb;
+  });
+
+  if (raw.length) raw[0].isCheapest = true;
+  return raw.slice(0, 3);
+}
+
+// validation helpers
+function planHasAnyLines(p: any) {
+  const s = p?.schedule;
+  const all = [
+    ...(s?.basal || []),
+    ...(s?.after30DAT || []),
+    ...(s?.topdress60DBH || []),
+  ];
+  return Array.isArray(all) && all.length > 0;
+}
+function planLooksSane(p: any) {
+  if (!p || typeof p !== 'object') return false;
+  if (!planHasAnyLines(p)) return false;
+
+  const s = p.schedule || {};
+  const lines = [
+    ...(s?.basal || []),
+    ...(s?.after30DAT || []),
+    ...(s?.topdress60DBH || []),
+  ];
+
+  const totalBags = lines.reduce((sum: number, x: any) => sum + Number(x?.bags || 0), 0);
+  if (!Number.isFinite(totalBags)) return false;
+  if (totalBags <= 0) return false;
+  if (totalBags > 60) return false;
+  return true;
+}
+function serverPlansAreUsable(serverPlans: any[]) {
+  if (!Array.isArray(serverPlans) || serverPlans.length < 3) return false;
+  const good = serverPlans.filter(planLooksSane);
+  return good.length >= 3;
+}
+
 export default function RecommendationScreen() {
   const router = useRouter();
   const { token, user } = useAuth();
-  const {
-    prices: adminPrices,
-    currency,
-    loading: pricesLoading,
-    refetchPrices,
-  } = useFertilizer();
+  const { currency, loading: pricesLoading } = useFertilizer();
   const { result: session } = useReadingSession();
 
-  // ------- resolve live values from ReadingSession -------
   const farmerId = session?.farmerId ?? '';
   const farmerName = session?.farmerName ?? '';
-  const nValue = session?.n ?? 0; // ppm
-  const pValue = session?.p ?? 0; // ppm
-  const kValue = session?.k ?? 0; // ppm
-  const phValue = session?.ph ?? 6.5;
-  const phStatus =
-    phValue < 5.5 ? 'Acidic' : phValue > 7.5 ? 'Alkaline' : 'Neutral';
 
-  // NPK levels (LOW / MEDIUM / HIGH)
-  const levelN = classifyLevel(nValue);
-  const levelP = classifyLevel(pValue);
-  const levelK = classifyLevel(kValue);
+  const nValue = Number(session?.n ?? 0);
+  const pValue = Number(session?.p ?? 0);
+  const kValue = Number(session?.k ?? 0);
+  const phValue = Number(session?.ph ?? 6.5);
 
-  // ------- nutrient text (which elements are LOW?) -------
-  const neededNutrients: string[] = [];
-  if (levelN === 'LOW') neededNutrients.push('Nitrogen');
-  if (levelP === 'LOW') neededNutrients.push('Phosphorus');
-  if (levelK === 'LOW') neededNutrients.push('Potassium');
+  const phStatus = phValue < 5.5 ? 'Acidic' : phValue > 7.5 ? 'Alkaline' : 'Neutral';
 
-  const neededStrEN =
-    neededNutrients.length === 0
-      ? 'no major additional nutrients'
-      : neededNutrients.join(', ').replace(/, ([^,]*)$/, ' and $1');
+  // ✅ FIX: nutrient-specific LMH
+  const levelN = classifyLevel('N', nValue);
+  const levelP = classifyLevel('P', pValue);
+  const levelK = classifyLevel('K', kValue);
 
-  const neededStrTL =
-    neededNutrients.length === 0
-      ? 'walay kulang nga nutriyente'
-      : neededNutrients.join(', ').replace(/, ([^,]*)$/, ' ug $1');
+  const nClass = toLMH(levelN);
+  const pClass = toLMH(levelP);
+  const kClass = toLMH(levelK);
 
-  // ------- narrative (local + English) -------
-  const recommendationText =
-    `Base sa datos, ang lupa ay nangangalangan og ${neededStrTL}. ` +
-    `Gamiton ang mga rekomendadong LGU fertilizer options sa ubos para sa 1 ka ektarya sa Hybrid rice.`;
+  const [resp, setResp] = React.useState<DaRecommendResponse | null>(null);
+  const [loadingRec, setLoadingRec] = React.useState(false);
 
-  const englishText =
-    `Based on the reading, the soil needs ${neededStrEN}. ` +
-    `You may follow the LGU fertilizer options below for 1 hectare of hybrid rice.`;
+  const [priceDoc, setPriceDoc] = React.useState<AdminPricesDoc | null>(null);
+  const [selectedPlanId, setSelectedPlanId] = React.useState<string | null>(null);
 
-  // ------- resolve fertilizer codes from price list -------
-  const fertCodes = React.useMemo(() => {
-    const p = adminPrices;
-    return {
-      urea: findFertCode(p, ['46-0-0', '46_0_0', 'urea']),
-      mop: findFertCode(p, ['0-0-60', '0_0_60', 'mop', 'potash']),
-      dap: findFertCode(p, ['18-46-0', '18_46_0', 'dap']),
-      complete141414: findFertCode(p, ['14-14-14', '14_14_14', 'complete']),
-      npk16200: findFertCode(p, ['16-20-0', '16_20_0']),
-      n2100: findFertCode(p, ['21-0-0', '21_0_0']),
-    };
-  }, [adminPrices]);
-
-  type LguPlan = {
-    code: string;                 // e.g. "OPT1"
-    title: string;                // "LGU Option 1"
-    bagsByFert: Record<string, number>; // fertCode -> bags/ha
-    total: number;                // total PHP/ha
-  };
-
-  // ------- LGU plans based on agriculture paper -------
-  const lguPlans: LguPlan[] = React.useMemo(() => {
-    const { urea, mop, dap, complete141414, npk16200, n2100 } = fertCodes;
-    const plans: LguPlan[] = [];
-
-    // Option 1: 18-46-0 (DAP) 3.00 + 0-0-60 (MOP) 2.33 + 46-0-0 (Urea) 4.43
-    if (dap && mop && urea) {
-      const bags = {
-        [dap]: 3.0,
-        [mop]: 2.33,
-        [urea]: 4.43,
-      };
-      const total =
-        bags[dap] * priceOf(adminPrices, dap) +
-        bags[mop] * priceOf(adminPrices, mop) +
-        bags[urea] * priceOf(adminPrices, urea);
-
-      plans.push({
-        code: 'OPT1',
-        title: 'LGU Option 1',
-        bagsByFert: bags,
-        total,
-      });
-    }
-
-    // Option 2: 16-20-0 7.00 + 0-0-60 2.33 + 46-0-0 4.52
-    if (npk16200 && mop && urea) {
-      const bags = {
-        [npk16200]: 7.0,
-        [mop]: 2.33,
-        [urea]: 4.52,
-      };
-      const total =
-        bags[npk16200] * priceOf(adminPrices, npk16200) +
-        bags[mop] * priceOf(adminPrices, mop) +
-        bags[urea] * priceOf(adminPrices, urea);
-
-      plans.push({
-        code: 'OPT2',
-        title: 'LGU Option 2',
-        bagsByFert: bags,
-        total,
-      });
-    }
-
-    // Option 3: 14-14-14 10.00 + 46-0-0 4.52
-    if (complete141414 && urea) {
-      const bags = {
-        [complete141414]: 10.0,
-        [urea]: 4.52,
-      };
-      const total =
-        bags[complete141414] * priceOf(adminPrices, complete141414) +
-        bags[urea] * priceOf(adminPrices, urea);
-
-      plans.push({
-        code: 'OPT3',
-        title: 'LGU Option 3',
-        bagsByFert: bags,
-        total,
-      });
-    }
-
-    // Option 4: 14-14-14 10.00 + 21-0-0 10.00
-    if (complete141414 && n2100) {
-      const bags = {
-        [complete141414]: 10.0,
-        [n2100]: 10.0,
-      };
-      const total =
-        bags[complete141414] * priceOf(adminPrices, complete141414) +
-        bags[n2100] * priceOf(adminPrices, n2100);
-
-      plans.push({
-        code: 'OPT4',
-        title: 'LGU Option 4',
-        bagsByFert: bags,
-        total,
-      });
-    }
-
-    return plans;
-  }, [adminPrices, fertCodes]);
-
-  // ------- local history save (using LGU plans) -------
-  const persistLocalHistory = React.useCallback(async () => {
-    if (!user?._id) return;
+  // ✅ fetch recommendation + prices together
+  const fetchRecommendation = React.useCallback(async () => {
+    setLoadingRec(true);
     try {
-      const userKey = `history:${user._id}`;
-      const date = new Date().toLocaleDateString('en-US', {
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric',
-      });
-      const phStr = `${phValue.toFixed(1)} (${phStatus})`;
+      const [r, pd] = await Promise.all([
+        token
+          ? getDaRecommendation(token, {
+              crop: 'rice_hybrid',
+              nClass,
+              pClass,
+              kClass,
+              areaHa: 1,
+            })
+          : Promise.resolve(null),
 
-      const historyPlans = lguPlans.map((plan, idx) => {
-        const details = Object.entries(plan.bagsByFert).map(
-          ([code, bags]) => {
-            const kg = (bags as number) * SACK_WEIGHT_KG;
-            return `${labelOf(adminPrices, code)}: ${bags.toFixed(
-              2
-            )} bags (${kg.toFixed(2)} kg)`;
-          }
-        );
-        return {
-          name: `${plan.title}`,
-          cost: `${currency} ${plan.total.toFixed(2)}`,
-          details,
-        };
-      });
+        // ✅ IMPORTANT: prices from PUBLIC endpoint (no admin token needed)
+        getPublicPrices().catch(() => null),
+      ]);
 
-      const newItem = {
-        id: `reading_${Date.now()}_${Math.random()
-          .toString(36)
-          .slice(2, 8)}`,
-        date,
-        ph: phStr,
-        n_value: nValue,
-        p_value: pValue,
-        k_value: kValue,
-        recommendationText,
-        englishText,
-        fertilizerPlans: historyPlans,
-      };
-
-      const raw = await AsyncStorage.getItem(userKey);
-      const prev = raw ? JSON.parse(raw) : [];
-      await AsyncStorage.setItem(userKey, JSON.stringify([newItem, ...prev]));
-    } catch (e) {
-      console.warn('local history save warn:', e);
+      setResp(r as any);
+      setPriceDoc(pd as any);
+      return { r: r as any, pd: pd as any };
+    } catch (e: any) {
+      console.error('recommendation fetch error:', e?.message || e);
+      setResp(null);
+      setPriceDoc(null);
+      return { r: null, pd: null };
+    } finally {
+      setLoadingRec(false);
     }
-  }, [
-    user?._id,
-    lguPlans,
-    adminPrices,
-    currency,
-    nValue,
-    pValue,
-    kValue,
-    phValue,
-    phStatus,
-    recommendationText,
-    englishText,
-  ]);
+  }, [token, nClass, pClass, kClass]);
 
-  // ------- save reading to backend (no server recommendation) -------
-  const [postStatus, setPostStatus] = React.useState<
-    'pending' | 'saving' | 'saved' | 'failed'
-  >('pending');
+  // plans computed from state for display
+  const plans = React.useMemo(() => {
+    const serverPlans = Array.isArray((resp as any)?.plans) ? (resp as any).plans : null;
+
+    if (serverPlans && serverPlansAreUsable(serverPlans)) {
+      const sorted = [...serverPlans].sort((a: any, b: any) => {
+        const ta = Number(a?.cost?.total ?? Number.POSITIVE_INFINITY);
+        const tb = Number(b?.cost?.total ?? Number.POSITIVE_INFINITY);
+        return ta - tb;
+      });
+
+      sorted.forEach((p: any) => (p.isCheapest = false));
+      if (sorted.length) sorted[0].isCheapest = true;
+
+      return sorted.slice(0, 3);
+    }
+
+    return build3PlansFallback({
+      resp,
+      prices: priceDoc,
+      nClass,
+      pClass,
+      kClass,
+      areaHa: 1,
+    });
+  }, [resp, priceDoc, nClass, pClass, kClass]);
+
+  React.useEffect(() => {
+    if (!plans?.length) return;
+
+    const currentExists =
+      selectedPlanId != null && plans.some((p: any) => String(p.id) === String(selectedPlanId));
+
+    if (!currentExists) {
+      const firstId = String(plans[0]?.id || '');
+      if (firstId) setSelectedPlanId(firstId);
+    }
+  }, [plans, selectedPlanId]);
+
+  const selectedPlan = React.useMemo(() => {
+    if (!plans.length) return null;
+    if (!selectedPlanId) return plans[0];
+    return plans.find((p: any) => String(p.id) === String(selectedPlanId)) || plans[0];
+  }, [plans, selectedPlanId]);
+
+  const [postStatus, setPostStatus] = React.useState<'pending' | 'saving' | 'saved' | 'failed'>('pending');
   const onceRef = React.useRef(false);
   const isSavingRef = React.useRef(false);
 
-  const saveReading = React.useCallback(async () => {
-    if (postStatus !== 'pending' || isSavingRef.current) return;
-    isSavingRef.current = true;
-    setPostStatus('saving');
+  const persistLocalHistory = React.useCallback(
+    async (plansForHistory: any[]) => {
+      if (!user?._id) return;
+      try {
+        const userKey = `history:${user._id}`;
+        const date = new Date().toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric',
+        });
+        const phStr = `${phValue.toFixed(1)} (${phStatus})`;
 
-    try {
-      const net = await NetInfo.fetch();
-      const online =
-        net.isInternetReachable === true
-          ? true
-          : net.isInternetReachable === false
-          ? false
-          : !!net.isConnected;
+        const fertilizerPlans =
+          Array.isArray(plansForHistory) && plansForHistory.length
+            ? plansForHistory.map((p: any) => ({
+                name: `${p.label}${p.isCheapest ? ' • Cheapest' : ''}`,
+                cost: `${p?.cost?.currency || currency || 'PHP'} ${moneyFmt(Number(p?.cost?.total || 0))}`,
+                details: normalizeDetailsFromSchedule(p.schedule),
+              }))
+            : [];
 
-      if (!online || !token) {
-        console.warn('Offline or no token: skipping cloud save.');
-      } else {
-        const payload = {
+        const newItem = {
+          id: `reading_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+          date,
+          ph: phStr,
+          n_value: nValue,
+          p_value: pValue,
+          k_value: kValue,
+          recommendationText: '',
+          englishText: '',
+          fertilizerPlans,
+        };
+
+        const raw = await AsyncStorage.getItem(userKey);
+        const prev = raw ? JSON.parse(raw) : [];
+        await AsyncStorage.setItem(userKey, JSON.stringify([newItem, ...prev]));
+      } catch (e) {
+        console.warn('local history save warn:', e);
+      }
+    },
+    [user?._id, nValue, pValue, kValue, phValue, phStatus, currency]
+  );
+
+  // ✅ save to backend (fixes: ph field + saves correct snapshot)
+  const saveReading = React.useCallback(
+    async (plansSnapshot: any[]) => {
+      if (postStatus !== 'pending' || isSavingRef.current) return;
+      isSavingRef.current = true;
+      setPostStatus('saving');
+
+      try {
+        const net = await NetInfo.fetch();
+        const online =
+          net.isInternetReachable === true
+            ? true
+            : net.isInternetReachable === false
+            ? false
+            : !!net.isConnected;
+
+        const chosen =
+          (selectedPlanId
+            ? plansSnapshot?.find((p: any) => String(p.id) === String(selectedPlanId))
+            : null) || plansSnapshot?.[0];
+
+        const fertilizerPlans =
+          Array.isArray(plansSnapshot) && plansSnapshot.length
+            ? plansSnapshot.map((p: any) => ({
+                name: `${p.label}${p.isCheapest ? ' • Cheapest' : ''}`,
+                cost: `${p?.cost?.currency || currency || 'PHP'} ${moneyFmt(Number(p?.cost?.total || 0))}`,
+                details: normalizeDetailsFromSchedule(p.schedule),
+              }))
+            : [];
+
+        const payload: any = {
           N: nValue,
           P: pValue,
           K: kValue,
+
+          // ✅ FIX: send "ph" not "pH"
           ph: phValue,
+
           source: 'esp32',
+          recommendationText: '',
+          englishText: '',
+          fertilizerPlans,
+          currency: chosen?.cost?.currency || currency || 'PHP',
+          daSchedule: chosen?.schedule ?? null,
+          daCost: chosen?.cost ?? null,
+          npkClass: resp?.classified?.npkClass || `${nClass}${pClass}${kClass}`,
         };
 
-        if (farmerId && isObjectId(farmerId)) {
-          await addReading({ ...payload, farmerId }, token);
+        if (!online || !token) {
+          console.warn('Offline or no token: skipping cloud save.');
         } else {
-          await addStandaloneReading(payload, token);
+          if (farmerId && isObjectId(farmerId)) {
+            await addReading({ ...payload, farmerId }, token);
+          } else {
+            await addStandaloneReading(payload, token);
+          }
         }
-      }
 
-      await persistLocalHistory();
-      setPostStatus('saved');
-    } catch (e: any) {
-      console.error('save error:', e?.message || e);
-      await persistLocalHistory();
-      setPostStatus('failed');
-      Alert.alert('Save Error', e?.message || 'Could not save reading.');
-    } finally {
-      isSavingRef.current = false;
-    }
-  }, [
-    postStatus,
-    token,
-    farmerId,
-    nValue,
-    pValue,
-    kValue,
-    phValue,
-    persistLocalHistory,
-  ]);
-
-  useFocusEffect(
-    React.useCallback(() => {
-      if (!onceRef.current) {
-        onceRef.current = true;
-        refetchPrices?.();
-        saveReading();
+        await persistLocalHistory(plansSnapshot || []);
+        setPostStatus('saved');
+      } catch (e: any) {
+        console.error('save error:', e?.message || e);
+        await persistLocalHistory(plansSnapshot || []);
+        setPostStatus('failed');
+        Alert.alert('Save Error', e?.message || 'Could not save reading.');
+      } finally {
+        isSavingRef.current = false;
       }
-    }, [refetchPrices, saveReading])
+    },
+    [
+      postStatus,
+      token,
+      farmerId,
+      nValue,
+      pValue,
+      kValue,
+      phValue,
+      currency,
+      resp,
+      persistLocalHistory,
+      nClass,
+      pClass,
+      kClass,
+      selectedPlanId,
+    ]
   );
 
-  // ------- PDF (only LGU plans) -------
+  // ✅ FIX: do NOT save stale "plans"
+  useFocusEffect(
+    React.useCallback(() => {
+      if (onceRef.current) return;
+      onceRef.current = true;
+
+      (async () => {
+        const { r, pd } = await fetchRecommendation();
+
+        // build snapshot plans using JUST fetched values (no stale state)
+        const serverPlans = Array.isArray((r as any)?.plans) ? (r as any).plans : null;
+
+        let snapshotPlans: any[] = [];
+        if (serverPlans && serverPlansAreUsable(serverPlans)) {
+          const sorted = [...serverPlans].sort((a: any, b: any) => {
+            const ta = Number(a?.cost?.total ?? Number.POSITIVE_INFINITY);
+            const tb = Number(b?.cost?.total ?? Number.POSITIVE_INFINITY);
+            return ta - tb;
+          });
+          sorted.forEach((p: any) => (p.isCheapest = false));
+          if (sorted.length) sorted[0].isCheapest = true;
+          snapshotPlans = sorted.slice(0, 3);
+        } else {
+          snapshotPlans = build3PlansFallback({
+            resp: r as any,
+            prices: pd as any,
+            nClass,
+            pClass,
+            kClass,
+            areaHa: 1,
+          });
+        }
+
+        if (snapshotPlans.length) setSelectedPlanId(String(snapshotPlans[0].id));
+        await saveReading(snapshotPlans);
+      })();
+    }, [fetchRecommendation, saveReading, nClass, pClass, kClass])
+  );
+
+  // ---- PDF (prints ONLY the selected plan) ----
   const [pdfBusy, setPdfBusy] = React.useState(false);
 
   const handleSavePDF = React.useCallback(async () => {
     if (pdfBusy) return;
+    if (!selectedPlan) {
+      Alert.alert('No Plan', 'No fertilizer plan available yet.');
+      return;
+    }
+
     setPdfBusy(true);
 
     const today = new Date();
     const ymd = today.toISOString().slice(0, 10);
     const filename = `STAKEHOLDER_READING_${ymd.replace(/-/g, '')}.pdf`;
 
-    const money = (v: number) =>
-      (v || 0).toLocaleString('en-PH', {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
-      });
+    const plan = selectedPlan as any;
+    const cur = plan?.cost?.currency || currency || 'PHP';
 
-    const plansHtml = lguPlans
-      .map((plan, idx) => {
-        const rows = Object.entries(plan.bagsByFert)
-          .map(([code, bags]) => {
-            const price = priceOf(adminPrices, code);
-            const subtotal = (bags as number) * price;
-            return `<tr>
-              <td>${labelOf(adminPrices, code)}</td>
-              <td style="text-align:right;">${(bags as number).toFixed(
-                2
-              )} bags</td>
-              <td style="text-align:right;">${currency} ${money(
-                subtotal
-              )}</td>
-            </tr>`;
-          })
-          .join('');
+    const fertCodes = Array.from(
+      new Set([
+        ...(plan?.schedule?.basal || []).map((x: any) => String(x.code)),
+        ...(plan?.schedule?.after30DAT || []).map((x: any) => String(x.code)),
+        ...(plan?.schedule?.topdress60DBH || []).map((x: any) => String(x.code)),
+      ])
+    );
 
-        return `
-          <div style="margin-top:18px;">
-            <div class="hdr">
-              <span>${plan.title}</span>
-              <span>${currency} ${money(plan.total)}</span>
-            </div>
-            <table>
-              <tr>
-                <th>Fertilizer</th>
-                <th style="text-align:right;">Bags/ha</th>
-                <th style="text-align:right;">Subtotal</th>
-              </tr>
-              ${rows}
-            </table>
-          </div>
-        `;
-      })
-      .join('');
+    const getBags = (stageArr: any[], code: string) => {
+      const it = (stageArr || []).find((x: any) => String(x.code) === String(code));
+      return it ? Number(it.bags || 0) : 0;
+    };
+
+    const headerCols = fertCodes.map((c) => `<th style="text-align:center;">${c}</th>`).join('');
+
+    const stageRow = (label: string, stageArr: any[]) => {
+      const cols = fertCodes
+        .map((c) => `<td style="text-align:center;">${bagsFmt(getBags(stageArr, c))}</td>`)
+        .join('');
+      return `<tr><td>${label}</td>${cols}</tr>`;
+    };
+
+    const totalRow = () => {
+      const totalsByCode: Record<string, number> = {};
+      const add = (arr: any[]) =>
+        (arr || []).forEach((x: any) => {
+          const c = String(x.code);
+          totalsByCode[c] = (totalsByCode[c] || 0) + Number(x.bags || 0);
+        });
+
+      add(plan?.schedule?.basal);
+      add(plan?.schedule?.after30DAT);
+      add(plan?.schedule?.topdress60DBH);
+
+      const cols = fertCodes
+        .map((c) => `<td style="text-align:center;"><b>${bagsFmt(totalsByCode[c] || 0)}</b></td>`)
+        .join('');
+
+      return `<tr><td><b>Total Bags</b></td>${cols}</tr>`;
+    };
 
     const html = `
       <html>
@@ -419,12 +746,13 @@ export default function RecommendationScreen() {
           <style>
             body { font-family: Arial, sans-serif; padding: 30px; }
             h1 { color: #2e7d32; margin: 0 0 6px; }
-            h3 { margin: 20px 0 10px; }
+            h3 { margin: 18px 0 10px; }
             .box { border:1px solid #ccc; padding:14px; border-radius:8px; background:#f8fff9; }
             table { width:100%; border-collapse:collapse; }
             th, td { border:1px solid #ccc; padding:8px 12px; text-align:left; }
             th { background:#f0f0f0; }
             .hdr { display:flex; justify-content:space-between; align-items:center; padding:10px 12px; background:#2e7d32; color:#fff; border-radius:6px 6px 0 0; }
+            .badge { display:inline-block; padding:4px 8px; border-radius:999px; font-size:12px; background:#eef7ee; border:1px solid #cfe7d4; margin-left:8px; }
             .footer { margin-top: 28px; color:#777; text-align:center; font-size:12px; }
           </style>
         </head>
@@ -436,17 +764,26 @@ export default function RecommendationScreen() {
           <h3>📟 Reading Results</h3>
           <div class="box">
             <p><b>pH:</b> ${phValue.toFixed(1)} (${phStatus})</p>
-            <p><b>N:</b> ${nValue} &nbsp; <b>P:</b> ${pValue} &nbsp; <b>K:</b> ${kValue}</p>
+            <p><b>N:</b> ${levelN} &nbsp; <b>P:</b> ${levelP} &nbsp; <b>K:</b> ${levelK}</p>
+            <p><b>Class:</b> ${resp?.classified?.npkClass || `${nClass}${pClass}${kClass}`}</p>
           </div>
 
-          <h3>📋 Recommendation</h3>
-          <div class="box">
-            <p>${recommendationText}</p>
-            <p style="font-style:italic;color:#555;">${englishText}</p>
+          <h3>📌 Fertilizer Plan</h3>
+          <div class="hdr">
+            <span>${plan.label}${plan.isDa ? ' (DA)' : ''}${plan.isCheapest ? ' • Cheapest' : ''}</span>
+            <span>${cur} ${moneyFmt(Number(plan?.cost?.total || 0))}</span>
           </div>
 
-          <h3>🏛️ LGU Fertilizer Options (per hectare)</h3>
-          ${plansHtml}
+          <table>
+            <tr>
+              <th>Stages</th>
+              ${headerCols}
+            </tr>
+            ${stageRow('Sa Pagtanom', plan?.schedule?.basal)}
+            ${stageRow('Pagkahuman sa ika 30 na adlaw', plan?.schedule?.after30DAT)}
+            ${stageRow('Top Dress (60 days ayha sa pag harvest)', plan?.schedule?.topdress60DBH)}
+            ${totalRow()}
+          </table>
 
           <div class="footer">FertiSense • ${today.getFullYear()}</div>
         </body>
@@ -474,20 +811,22 @@ export default function RecommendationScreen() {
     }
   }, [
     pdfBusy,
-    adminPrices,
-    lguPlans,
+    selectedPlan,
     currency,
     farmerName,
-    nValue,
-    pValue,
-    kValue,
     phValue,
     phStatus,
-    recommendationText,
-    englishText,
+    levelN,
+    levelP,
+    levelK,
+    resp,
+    nClass,
+    pClass,
+    kClass,
   ]);
 
-  // -------------- UI --------------
+  const loadingAny = pricesLoading || loadingRec;
+
   return (
     <ScrollView contentContainerStyle={styles.container}>
       <Image
@@ -499,121 +838,142 @@ export default function RecommendationScreen() {
       {/* READING RESULTS */}
       <View style={styles.readBox}>
         <Text style={styles.readTitle}>📟 Reading Results</Text>
+
         <Text style={styles.readLine}>
           <Text style={styles.bold}>pH:</Text> {phValue.toFixed(1)} ({phStatus})
         </Text>
-        <Text style={styles.readLine}>
-          <Text style={styles.bold}>N:</Text> {nValue} ({levelN}){'  '}
-          <Text style={styles.bold}>P:</Text> {pValue} ({levelP}){'  '}
-          <Text style={styles.bold}>K:</Text> {kValue} ({levelK})
-        </Text>
-        {!!farmerName && (
-          <Text style={styles.readSubtle}>Farmer: {farmerName}</Text>
-        )}
-      </View>
 
-      {/* LOCAL NARRATIVE */}
-      <View style={styles.recommendationBox}>
-        <Text style={styles.recommendationTitle}>
-          Rekomendasyon:{' '}
-          <Text style={{ fontStyle: 'italic' }}>(Recommendation)</Text>
+        <Text style={styles.readLine}>
+          <Text style={styles.bold}>N:</Text> {levelN}{'  '}
+          <Text style={styles.bold}>P:</Text> {levelP}{'  '}
+          <Text style={styles.bold}>K:</Text> {levelK}
         </Text>
-        <Text style={styles.recommendationText}>{recommendationText}</Text>
-        <Text style={styles.englishText}>{englishText}</Text>
+
+        {!!farmerName && <Text style={styles.readSubtle}>Farmer: {farmerName}</Text>}
       </View>
 
       <View style={styles.divider} />
-      <Text style={styles.sectionTitle}>LGU Fertilizer Recommendations</Text>
+      <Text style={styles.sectionTitle}>Fertilizer Plans (Cheapest First)</Text>
 
-      {pricesLoading && (
-        <Text
-          style={{
-            textAlign: 'center',
-            color: '#888',
-            marginVertical: 10,
-          }}
-        >
-          Loading Prices...
+      {loadingAny && (
+        <Text style={{ textAlign: 'center', color: '#888', marginVertical: 10 }}>
+          Loading Plans...
         </Text>
       )}
 
-      {/* LGU PLANS */}
-      {lguPlans.map((plan, idx) => (
-        <View key={plan.code} style={styles.table}>
-          <View style={styles.tableHeader}>
-            <Text style={styles.tableTitle}>
-              {plan.title} – {idx + 1}
-            </Text>
-            <Text style={styles.priceTag}>
-              {currency} {(plan.total || 0).toFixed(2)}
-            </Text>
-          </View>
+      {!loadingAny && plans.length === 0 && (
+        <Text style={{ textAlign: 'center', color: '#888', marginVertical: 10 }}>
+          No plans available.
+        </Text>
+      )}
 
-          {/* header row */}
-          <View style={styles.tableRow}>
-            <Text style={[styles.cellHeader, { flex: 2 }]}>Stages</Text>
-            {Object.keys(plan.bagsByFert).map(code => (
-              <Text key={`hdr-${code}`} style={styles.cellHeader}>
-                {labelOf(adminPrices, code)}
-              </Text>
-            ))}
-          </View>
+      {plans.map((p: any) => {
+        const isSelected = String(p.id) === String(selectedPlanId);
+        const cur = p?.cost?.currency || currency || 'PHP';
 
-          {/* planting row */}
-          <View style={styles.tableRow}>
-            <Text style={[styles.cell, { flex: 2 }]}>Sa Pagtanim</Text>
-            {Object.entries(plan.bagsByFert).map(([code, bags]) => {
-              // simple rule: all non-urea at planting; urea is split 50/50
-              const isUrea = code === fertCodes.urea;
-              const plantingBags = isUrea ? (bags as number) / 2 : (bags as number);
-              return (
-                <Text key={`plant-${code}`} style={styles.cell}>
-                  {plantingBags.toFixed(2)}
+        const fertCodes = Array.from(
+          new Set([
+            ...(p?.schedule?.basal || []).map((x: any) => String(x.code)),
+            ...(p?.schedule?.after30DAT || []).map((x: any) => String(x.code)),
+            ...(p?.schedule?.topdress60DBH || []).map((x: any) => String(x.code)),
+          ])
+        );
+
+        const stageBags = (stageArr: any[], code: string) => {
+          const it = (stageArr || []).find((x: any) => String(x.code) === String(code));
+          return it ? Number(it.bags || 0) : 0;
+        };
+
+        const totalsByCode: Record<string, number> = {};
+        const addTotals = (arr: any[]) =>
+          (arr || []).forEach((x: any) => {
+            const c = String(x.code);
+            totalsByCode[c] = (totalsByCode[c] || 0) + Number(x.bags || 0);
+          });
+
+        addTotals(p?.schedule?.basal);
+        addTotals(p?.schedule?.after30DAT);
+        addTotals(p?.schedule?.topdress60DBH);
+
+        return (
+          <TouchableOpacity
+            key={String(p.id)}
+            activeOpacity={0.9}
+            onPress={() => setSelectedPlanId(String(p.id))}
+            style={[styles.table, isSelected && styles.tableSelected]}
+          >
+            <View style={styles.tableHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.tableTitle}>
+                  {p.label}{' '}
+                  {p.isCheapest ? <Text style={styles.badge}>Cheapest</Text> : null}
+                  {p.isDa ? <Text style={styles.badge}>DA</Text> : null}
                 </Text>
-              );
-            })}
-          </View>
+                <Text style={styles.tableSub}>Tap to select this plan for PDF</Text>
+              </View>
 
-          {/* 30d row */}
-          <View style={styles.tableRow}>
-            <Text style={[styles.cell, { flex: 2 }]}>
-              Pagkatapos ng 30 Araw
-            </Text>
-            {Object.entries(plan.bagsByFert).map(([code, bags]) => {
-              const isUrea = code === fertCodes.urea;
-              const after30 = isUrea ? (bags as number) / 2 : 0;
-              return (
-                <Text key={`30d-${code}`} style={styles.cell}>
-                  {after30.toFixed(2)}
-                </Text>
-              );
-            })}
-          </View>
-
-          {/* totals */}
-          <View style={[styles.tableRow, styles.tableFooter]}>
-            <Text style={[styles.cellHeader, { flex: 2 }]}>Total Bags</Text>
-            {Object.entries(plan.bagsByFert).map(([code, bags]) => (
-              <Text key={`tot-${code}`} style={styles.cellHeader}>
-                {(bags as number).toFixed(2)}
+              <Text style={styles.priceTag}>
+                {cur} {moneyFmt(Number(p?.cost?.total || 0))}
               </Text>
-            ))}
-          </View>
-        </View>
-      ))}
+            </View>
+
+            {/* header */}
+            <View style={styles.tableRow}>
+              <Text style={[styles.cellHeader, { flex: 2 }]}>Stages</Text>
+              {fertCodes.map((code) => (
+                <Text key={`hdr-${p.id}-${code}`} style={styles.cellHeader}>
+                  {code}
+                </Text>
+              ))}
+            </View>
+
+            {/* planting */}
+            <View style={styles.tableRow}>
+              <Text style={[styles.cell, { flex: 2 }]}>Sa Pagtanim</Text>
+              {fertCodes.map((code) => (
+                <Text key={`plant-${p.id}-${code}`} style={styles.cell}>
+                  {bagsFmt(stageBags(p?.schedule?.basal, code))}
+                </Text>
+              ))}
+            </View>
+
+            {/* after 30 days */}
+            <View style={styles.tableRow}>
+              <Text style={[styles.cell, { flex: 2 }]}>Pagkatapos ng 30 Araw</Text>
+              {fertCodes.map((code) => (
+                <Text key={`30d-${p.id}-${code}`} style={styles.cell}>
+                  {bagsFmt(stageBags(p?.schedule?.after30DAT, code))}
+                </Text>
+              ))}
+            </View>
+
+            {/* topdress */}
+            <View style={styles.tableRow}>
+              <Text style={[styles.cell, { flex: 2 }]}>Top Dress - 60 days before harvest</Text>
+              {fertCodes.map((code) => (
+                <Text key={`top-${p.id}-${code}`} style={styles.cell}>
+                  {bagsFmt(stageBags(p?.schedule?.topdress60DBH, code))}
+                </Text>
+              ))}
+            </View>
+
+            {/* totals */}
+            <View style={[styles.tableRow, styles.tableFooter]}>
+              <Text style={[styles.cellHeader, { flex: 2 }]}>Total Bags</Text>
+              {fertCodes.map((code) => (
+                <Text key={`tot-${p.id}-${code}`} style={styles.cellHeader}>
+                  {bagsFmt(totalsByCode[code] || 0)}
+                </Text>
+              ))}
+            </View>
+          </TouchableOpacity>
+        );
+      })}
 
       <View style={styles.downloadToggle}>
-        <Text style={styles.downloadLabel}>Save a copy</Text>
-        <TouchableOpacity
-          onPress={handleSavePDF}
-          disabled={pdfBusy || pricesLoading}
-        >
-          <Text
-            style={[
-              styles.downloadButton,
-              (pdfBusy || pricesLoading) && styles.disabledText,
-            ]}
-          >
+        <Text style={styles.downloadLabel}>Save a copy (selected plan)</Text>
+        <TouchableOpacity onPress={handleSavePDF} disabled={pdfBusy || loadingAny}>
+          <Text style={[styles.downloadButton, (pdfBusy || loadingAny) && styles.disabledText]}>
             {pdfBusy ? 'Generating…' : '📄 Download PDF'}
           </Text>
         </TouchableOpacity>
@@ -636,7 +996,7 @@ const styles = StyleSheet.create({
     flexGrow: 1,
     paddingBottom: 80,
   },
-  logo: { width: 200, height: 200, alignSelf: 'center', marginBottom: -30 },
+  logo: { width: 120, height: 200, alignSelf: 'center', marginBottom: -30 },
 
   readBox: {
     backgroundColor: '#eef7ee',
@@ -654,23 +1014,6 @@ const styles = StyleSheet.create({
   readSubtle: { fontSize: 12, color: '#666', marginTop: 4 },
   bold: { fontWeight: 'bold' },
 
-  recommendationBox: {
-    borderColor: '#4CAF50',
-    borderWidth: 1.5,
-    padding: 16,
-    borderRadius: 10,
-    marginBottom: 20,
-    backgroundColor: '#f8fff9',
-  },
-  recommendationTitle: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#2e7d32',
-    marginBottom: 8,
-  },
-  recommendationText: { fontSize: 14, marginBottom: 8, color: '#222' },
-  englishText: { fontSize: 13, color: '#555', fontStyle: 'italic' },
-
   divider: {
     height: 1,
     backgroundColor: '#000',
@@ -685,28 +1028,47 @@ const styles = StyleSheet.create({
   },
 
   table: {
-    marginBottom: 20,
+    marginBottom: 16,
     borderWidth: 1,
     borderColor: '#ccc',
-    borderRadius: 8,
+    borderRadius: 10,
     overflow: 'hidden',
+  },
+  tableSelected: {
+    borderColor: '#2e7d32',
+    borderWidth: 2,
   },
   tableHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     backgroundColor: '#f0f0f0',
     padding: 10,
+    gap: 10,
   },
   tableTitle: { fontSize: 14, fontWeight: 'bold' },
+  tableSub: { fontSize: 11, color: '#666', marginTop: 2 },
+
+  badge: {
+    fontSize: 11,
+    color: '#1b5e20',
+    backgroundColor: '#eef7ee',
+    borderColor: '#cfe7d4',
+    borderWidth: 1,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 999,
+  },
+
   priceTag: {
     backgroundColor: '#5D9239',
     color: '#fff',
     fontWeight: 'bold',
     paddingHorizontal: 12,
-    paddingVertical: 4,
+    paddingVertical: 6,
     borderRadius: 10,
     fontSize: 13,
+    alignSelf: 'flex-start',
   },
 
   tableRow: { flexDirection: 'row', borderTopWidth: 1, borderColor: '#ddd' },

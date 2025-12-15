@@ -1,7 +1,7 @@
 // =============================================================
 // File: app/(stakeholder)/tabs/stakeholder-profile.tsx
 // Purpose: Stakeholder profile with aesthetic bottom-sheet editor
-// Notes: Shows all infos; popup editor; safe-area; photo controls
+// Notes: Uses SafeAreaView + insets so content never sits behind nav bar
 // =============================================================
 
 import { Ionicons } from '@expo/vector-icons';
@@ -23,7 +23,6 @@ import {
   RefreshControl,
   Modal,
   Dimensions,
-  SafeAreaView,
   KeyboardAvoidingView,
   Animated,
   Easing,
@@ -33,7 +32,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import axios from 'axios';
 import { useAuth } from '../../../context/AuthContext';
 import { BASE_URL } from '../../../src/api';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 const API_URL = BASE_URL;
 const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
@@ -336,6 +335,7 @@ function EditDetailsSheet({
 /* ------------------------ Main Profile Screen ----------------------- */
 export default function StakeholderProfileScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets(); // 👈 like stakeholder-home
   const { user, token, logout, refreshMe } = useAuth();
 
   const [editing, setEditing] = useState(false); // controls sheet visibility
@@ -397,7 +397,11 @@ export default function StakeholderProfileScreen() {
   // Photo source (server or local preview)
   const fullPhotoUrl = profilePreview || user?.photoUrl || null;
   const profileSource = fullPhotoUrl
-    ? { uri: fullPhotoUrl.startsWith('http') ? fullPhotoUrl : `${BASE_URL}${fullPhotoUrl}?t=${imageTimestamp}` }
+    ? {
+        uri: fullPhotoUrl.startsWith('http')
+          ? fullPhotoUrl
+          : `${BASE_URL}${fullPhotoUrl}?t=${imageTimestamp}`,
+      }
     : null;
 
   // Upload photo
@@ -471,7 +475,10 @@ export default function StakeholderProfileScreen() {
             Alert.alert('Success', 'Profile picture deleted.');
           } catch (err: any) {
             console.error('Delete error:', err?.response?.data || err?.message || err);
-            Alert.alert('Error', err?.response?.data?.error || err?.message || 'Failed to delete photo.');
+            Alert.alert(
+              'Error',
+              err?.response?.data?.error || err?.message || 'Failed to delete photo.'
+            );
           } finally {
             setDeleting(false);
           }
@@ -481,7 +488,12 @@ export default function StakeholderProfileScreen() {
   };
 
   // Save details (patch + refresh + close)
-  const saveDetails = async (draft: { name: string; mobile: string; address: string; farmLocation: string }) => {
+  const saveDetails = async (draft: {
+    name: string;
+    mobile: string;
+    address: string;
+    farmLocation: string;
+  }) => {
     try {
       setSaving(true);
       await axios.patch(
@@ -509,14 +521,20 @@ export default function StakeholderProfileScreen() {
   const [promoNotif, setPromoNotif] = useState(false);
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: '#fff' }}>
+    <SafeAreaView
+      style={{ flex: 1, backgroundColor: '#fff' }}
+      edges={['bottom']} // 👈 SAME PATTERN AS STAKEHOLDER HOME
+    >
       <KeyboardAvoidingView
         behavior={Platform.select({ ios: 'padding', android: undefined })}
         style={{ flex: 1 }}
       >
         <ScrollView
           style={styles.container}
-          contentContainerStyle={{ paddingBottom: 110, paddingTop: 8 }}
+          contentContainerStyle={[
+            styles.scrollContent,
+            { paddingBottom: insets.bottom + 100 }, // 👈 dynamic + extra spacing
+          ]}
           refreshControl={
             <RefreshControl
               refreshing={refreshing}
@@ -725,6 +743,12 @@ export default function StakeholderProfileScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#fff' },
 
+  // 👇 like stakeholder-home: we handle paddingBottom via insets
+  scrollContent: {
+    paddingTop: 8,
+    paddingBottom: 60, // base; extended by insets in component
+  },
+
   topArc: {
     height: 120,
     backgroundColor: GREEN,
@@ -908,7 +932,6 @@ const sheetStyles = StyleSheet.create({
     borderTopRightRadius: 24,
     paddingTop: 6,
     paddingHorizontal: 16,
-    // bottom padding handled by sticky footer
     shadowColor: '#000',
     shadowOpacity: 0.2,
     shadowRadius: 12,

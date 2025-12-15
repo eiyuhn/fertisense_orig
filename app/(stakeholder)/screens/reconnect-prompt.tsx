@@ -1,5 +1,4 @@
 // app/(stakeholder)/screens/reconnect-prompt.tsx
-
 import React, { useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
@@ -16,6 +15,12 @@ type Params = {
   farmerName?: string;
 };
 
+const toNum = (v: any): number | undefined => {
+  if (v === null || v === undefined) return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
+};
+
 export default function ReconnectPromptScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<Params>();
@@ -25,12 +30,12 @@ export default function ReconnectPromptScreen() {
     (async () => {
       try {
         await setFromParams({
-          n: params.n,
-          p: params.p,
-          k: params.k,
-          ph: params.ph,
-          farmerId: params.farmerId,
-          farmerName: params.farmerName,
+          n: toNum(params.n),
+          p: toNum(params.p),
+          k: toNum(params.k),
+          ph: toNum(params.ph),
+          farmerId: typeof params.farmerId === 'string' ? params.farmerId : undefined,
+          farmerName: typeof params.farmerName === 'string' ? params.farmerName : undefined,
           ts: Date.now(),
         });
       } catch (e) {
@@ -51,25 +56,29 @@ export default function ReconnectPromptScreen() {
         color="#E53935"
         style={{ marginBottom: 20 }}
       />
-      <Text style={styles.title}>Internet Connection Required</Text>
+
+      <Text style={styles.title}>Kinahanglan og Internet Connection</Text>
+
       <Text style={styles.instruction}>
-        Natapos na ang pagbasa ng sensor.
+        Nahuman na ang pagbasa sa sensor.
         <Text style={styles.bold}>
           {' '}
-          Kailangan mong bumalik sa inyong normal na Wi-Fi (na may internet){' '}
+          Kinahanglan ka mobalik sa imong normal nga Wi-Fi (nga naay internet){' '}
         </Text>
-        upang maipadala ang datos at makuha ang rekomendasyon.
+        aron ma-upload ang datos ug makuha ang rekomendasyon.
       </Text>
+
       <Text style={styles.instructionNote}>
-        1. Disconnect mula sa <Text style={styles.bold}>"ESP32-NPK"</Text> Wi-Fi.
+        1. I-disconnect ang <Text style={styles.bold}>"ESP32-NPK"</Text> nga Wi-Fi.
       </Text>
+
       <Text style={styles.instructionNote}>
-        2. Kumonekta sa isang <Text style={styles.bold}>Internet-Enabled</Text> Wi-Fi.
+        2. Ikonek ang cellphone sa usa ka <Text style={styles.bold}>Wi-Fi nga naay Internet</Text>.
       </Text>
 
       <TouchableOpacity style={styles.actionButton} onPress={handleProceed}>
         <Ionicons name="cloud-upload-outline" size={22} color="#fff" />
-        <Text style={styles.actionButtonText}>I-connect at Magpatuloy</Text>
+        <Text style={styles.actionButtonText}>Continue</Text>
       </TouchableOpacity>
     </View>
   );
@@ -103,9 +112,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginBottom: 8,
   },
-  bold: {
-    fontWeight: 'bold',
-  },
+  bold: { fontWeight: 'bold' },
   actionButton: {
     marginTop: 40,
     backgroundColor: '#2e7d32',

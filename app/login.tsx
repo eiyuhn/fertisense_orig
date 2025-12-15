@@ -171,7 +171,7 @@ const styles = StyleSheet.create({
     zIndex: 10,
   },
   logo: {
-    width: 220,
+    width: 120,
     height: 220,
     alignSelf: 'center',
     marginTop: -160,

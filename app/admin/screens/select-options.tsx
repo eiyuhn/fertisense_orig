@@ -15,12 +15,6 @@ import {
   View,
 } from 'react-native';
 
-const cropStyleOptions = [
-  { label: 'Pumili...', value: '', enabled: false },
-  { label: 'Irrigated', value: 'irrigated' },
-  { label: 'Rainfed', value: 'rainfed' },
-  { label: 'Pareho', value: 'pareho' },
-];
 
 const soilTypeOptions = [
   { label: 'Pumili...', value: '', enabled: false },
@@ -42,11 +36,11 @@ export default function SelectOptionsScreen() {
   }>();
 
   const [riceType, setRiceType] = useState('');
-  const [cropStyle, setCropStyle] = useState('');
+ 
   const [soilType, setSoilType] = useState('');
   const [season, setSeason] = useState('');
 
-  const allSelected = riceType && cropStyle && soilType && season;
+  const allSelected = riceType && soilType && season;
 
   const renderItems = (
     opts: { label: string; value: string; enabled?: boolean }[]
@@ -113,20 +107,6 @@ export default function SelectOptionsScreen() {
           </View>
         </View>
 
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>💧 Estilo ng Sakahan</Text>
-          <View
-            style={[styles.pickerWrapper, cropStyle !== '' && styles.pickerSelected]}
-          >
-            <Picker
-              selectedValue={cropStyle}
-              onValueChange={(v) => setCropStyle(String(v))}
-              style={[styles.picker, cropStyle !== '' && styles.selectedPickerText]}
-            >
-              {renderItems(cropStyleOptions)}
-            </Picker>
-          </View>
-        </View>
 
         <View style={styles.card}>
           <Text style={styles.cardTitle}>🧱 Uri ng Lupa</Text>

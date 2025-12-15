@@ -30,10 +30,9 @@ export type RegisterPayload = {
   address?: string;
   farmLocation?: string;
   mobile?: string;
-  email: string; // ✅ required string again (we’ll send '')
+  email: string; // required string, can send '' if none
   securityQuestions?: SecurityQuestionPayload[];
 };
-
 
 export type LoginPayload = { username: string; password: string };
 
@@ -49,10 +48,28 @@ export type LoginResponse = {
   user: User;
 };
 
+/* ===== Admin: Stakeholders List ===== */
+export type StakeholderLite = {
+  _id: string;
+  username: string;
+  name: string;
+};
+
+export type StakeholdersResponse = {
+  count: number;
+  users: StakeholderLite[];
+};
+
 // search farmer by code or id
 export type GetFarmerParams = { code?: string; id?: string };
 
 /* ===== Add Reading ===== */
+export type FertilizerPlanHistory = {
+  name?: string;
+  cost?: string;
+  details?: string[];
+};
+
 export type AddReadingParams = {
   farmerId: string;
   N: number;
@@ -63,6 +80,17 @@ export type AddReadingParams = {
   moisture?: number | null;
   temp?: number | null;
   source?: 'esp32' | 'manual' | string;
+
+  // ✅ stored in MongoDB Reading (for History screen)
+  recommendationText?: string;
+  englishText?: string;
+  fertilizerPlans?: FertilizerPlanHistory[];
+  currency?: string;
+
+  // ✅ optional DA fields (safe even if backend ignores)
+  daSchedule?: any;
+  daCost?: any;
+  npkClass?: string;
 };
 
 // Standalone reading (no farmerId) – used on STAKEHOLDER side
@@ -75,6 +103,17 @@ export type AddStandaloneReadingParams = {
   moisture?: number | null;
   temp?: number | null;
   source?: 'esp32' | 'manual' | string;
+
+  // ✅ stored in MongoDB Reading (for History screen)
+  recommendationText?: string;
+  englishText?: string;
+  fertilizerPlans?: FertilizerPlanHistory[];
+  currency?: string;
+
+  // ✅ optional DA fields
+  daSchedule?: any;
+  daCost?: any;
+  npkClass?: string;
 };
 
 /* ===== Helpers ===== */
@@ -85,6 +124,15 @@ function authHeaders(token?: string | null) {
 function makeRandomCode(prefix = 'FS'): string {
   const rand = Math.random().toString(36).slice(2, 7).toUpperCase();
   return `${prefix}-${rand}`;
+}
+
+function normalizePlans(plans?: FertilizerPlanHistory[]) {
+  if (!Array.isArray(plans)) return undefined;
+  return plans.map((p) => ({
+    name: p?.name != null ? String(p.name) : '',
+    cost: p?.cost != null ? String(p.cost) : '',
+    details: Array.isArray(p?.details) ? p.details.map((x) => String(x)) : [],
+  }));
 }
 
 /* ===== Health / Ping ===== */
@@ -99,9 +147,7 @@ export async function loginApi(payload: LoginPayload): Promise<LoginResponse> {
   return data;
 }
 
-export async function registerApi(
-  payload: RegisterPayload
-): Promise<LoginResponse> {
+export async function registerApi(payload: RegisterPayload): Promise<LoginResponse> {
   const { data } = await api.post('/api/auth/register', payload);
   return data;
 }
@@ -121,10 +167,7 @@ export async function listFarmers(token?: string | null): Promise<any[]> {
   return Array.isArray(data) ? data : [];
 }
 
-export async function getFarmer(
-  params: GetFarmerParams,
-  token?: string | null
-): Promise<any | null> {
+export async function getFarmer(params: GetFarmerParams, token?: string | null): Promise<any | null> {
   const { data } = await api.get('/api/farmers', {
     params,
     headers: authHeaders(token || undefined),
@@ -132,10 +175,24 @@ export async function getFarmer(
   return Array.isArray(data) ? data[0] ?? null : data ?? null;
 }
 
-export async function createFarmer(
-  body: any,
-  token?: string | null
-): Promise<any> {
+/* ===== Admin: Stakeholders List ===== */
+export async function getStakeholders(token?: string | null): Promise<StakeholdersResponse> {
+  const { data } = await api.get('/api/admin/stakeholders', {
+    headers: authHeaders(token || undefined),
+  });
+
+  const usersRaw = Array.isArray(data?.users) ? data.users : [];
+  return {
+    count: Number(data?.count ?? usersRaw.length),
+    users: usersRaw.map((u: any) => ({
+      _id: String(u?._id || ''),
+      username: String(u?.username || ''),
+      name: String(u?.name || ''),
+    })),
+  };
+}
+
+export async function createFarmer(body: any, token?: string | null): Promise<any> {
   const { code: _omit, ...rest } = body || {};
   try {
     const { data } = await api.post('/api/farmers', rest, {
@@ -157,11 +214,7 @@ export async function createFarmer(
   }
 }
 
-export async function updateFarmer(
-  id: string,
-  body: any,
-  token?: string | null
-): Promise<any> {
+export async function updateFarmer(id: string, body: any, token?: string | null): Promise<any> {
   const { code: _omit, ...rest } = body || {};
   const { data } = await api.put(`/api/farmers/${id}`, rest, {
     headers: authHeaders(token || undefined),
@@ -169,10 +222,7 @@ export async function updateFarmer(
   return data;
 }
 
-export async function deleteFarmer(
-  id: string,
-  token?: string | null
-): Promise<any> {
+export async function deleteFarmer(id: string, token?: string | null): Promise<any> {
   const { data } = await api.delete(`/api/farmers/${id}`, {
     headers: authHeaders(token || undefined),
   });
@@ -200,9 +250,7 @@ export async function getPublicPrices(): Promise<AdminPricesDoc> {
   return data;
 }
 
-export async function getPriceSettings(
-  token?: string | null
-): Promise<AdminPricesDoc> {
+export async function getPriceSettings(token?: string | null): Promise<AdminPricesDoc> {
   const { data } = await api.get('/api/prices/admin', {
     headers: authHeaders(token || undefined),
   });
@@ -222,25 +270,26 @@ export async function putPriceSettings(
   return data;
 }
 
-/* ===== Readings (Farmer Logs) ===== */
-
-export async function listReadingsByFarmer(
-  farmerId: string,
-  token?: string | null
-): Promise<any[]> {
-  const { data } = await api.get(`/api/farmers/${farmerId}/readings`, {
+/* ===== Readings (Farmer Logs + User-wide history) ===== */
+export async function listUserReadings(token?: string | null): Promise<any[]> {
+  const { data } = await api.get('/api/readings', {
     headers: authHeaders(token || undefined),
   });
   return Array.isArray(data) ? data : [];
 }
 
-export async function addReading(
-  body: AddReadingParams,
-  token?: string | null
-): Promise<any> {
+export async function listReadingsByFarmer(farmerId: string, token?: string | null): Promise<any[]> {
+  const { data } = await api.get(`/api/readings/farmers/${farmerId}`, {
+    headers: authHeaders(token || undefined),
+  });
+  return Array.isArray(data) ? data : [];
+}
+
+export async function addReading(body: AddReadingParams, token?: string | null): Promise<any> {
   const { farmerId, ...rest } = body;
 
   const payload: any = {
+    farmerId,
     n: Number(rest.N ?? 0),
     p: Number(rest.P ?? 0),
     k: Number(rest.K ?? 0),
@@ -252,13 +301,21 @@ export async function addReading(
   if (rest.ec != null) payload.ec = Number(rest.ec);
   if (rest.temp != null) payload.temp = Number(rest.temp);
 
-  const { data } = await api.post(
-    `/api/farmers/${farmerId}/readings`,
-    payload,
-    {
-      headers: authHeaders(token || undefined),
-    }
-  );
+  // ✅ pass-through for Mongo history
+  if (rest.recommendationText != null) payload.recommendationText = String(rest.recommendationText);
+  if (rest.englishText != null) payload.englishText = String(rest.englishText);
+  if (rest.currency != null) payload.currency = String(rest.currency);
+  const plans = normalizePlans(rest.fertilizerPlans);
+  if (plans) payload.fertilizerPlans = plans;
+
+  // ✅ optional DA fields
+  if (rest.daSchedule != null) payload.daSchedule = rest.daSchedule;
+  if (rest.daCost != null) payload.daCost = rest.daCost;
+  if (rest.npkClass != null) payload.npkClass = String(rest.npkClass);
+
+  const { data } = await api.post('/api/readings', payload, {
+    headers: authHeaders(token || undefined),
+  });
 
   return data;
 }
@@ -278,6 +335,18 @@ export async function addStandaloneReading(
     source: body.source ?? 'esp32',
   };
 
+  // ✅ pass-through for Mongo history
+  if (body.recommendationText != null) payload.recommendationText = String(body.recommendationText);
+  if (body.englishText != null) payload.englishText = String(body.englishText);
+  if (body.currency != null) payload.currency = String(body.currency);
+  const plans = normalizePlans(body.fertilizerPlans);
+  if (plans) payload.fertilizerPlans = plans;
+
+  // ✅ optional DA fields
+  if (body.daSchedule != null) payload.daSchedule = body.daSchedule;
+  if (body.daCost != null) payload.daCost = body.daCost;
+  if (body.npkClass != null) payload.npkClass = String(body.npkClass);
+
   const { data } = await api.post('/api/readings', payload, {
     headers: authHeaders(token || undefined),
   });
@@ -285,45 +354,58 @@ export async function addStandaloneReading(
 }
 
 export async function updateReading(
-  farmerId: string,
+  farmerId: string, // unused
   readingId: string,
   body: Partial<AddReadingParams>,
   token?: string | null
 ): Promise<any> {
   const payload: any = {};
-  if (body.N !== undefined) payload.N = body.N;
-  if (body.P !== undefined) payload.P = body.P;
-  if (body.K !== undefined) payload.K = body.K;
-  if (body.ph !== undefined) payload.ph = body.ph;
-  if (body.ec !== undefined) payload.ec = body.ec;
-  if (body.moisture !== undefined) payload.moisture = body.moisture;
-  if (body.temp !== undefined) payload.temp = body.temp;
+
+  // ✅ match backend pickReadingNumbers()
+  if (body.N !== undefined) payload.n = Number(body.N);
+  if (body.P !== undefined) payload.p = Number(body.P);
+  if (body.K !== undefined) payload.k = Number(body.K);
+
+  if (body.ph !== undefined) payload.ph = body.ph == null ? null : Number(body.ph);
+  if (body.ec !== undefined) payload.ec = body.ec == null ? null : Number(body.ec);
+  if (body.moisture !== undefined) payload.moisture = body.moisture == null ? null : Number(body.moisture);
+  if (body.temp !== undefined) payload.temp = body.temp == null ? null : Number(body.temp);
+
   if (body.source !== undefined) payload.source = body.source;
 
-  const { data } = await api.patch(
-    `/api/farmers/${farmerId}/readings/${readingId}`,
-    payload,
-    { headers: authHeaders(token || undefined) }
-  );
+  // ✅ allow updating plan fields too
+  if ((body as any).recommendationText !== undefined) payload.recommendationText = String((body as any).recommendationText ?? '');
+  if ((body as any).englishText !== undefined) payload.englishText = String((body as any).englishText ?? '');
+  if ((body as any).currency !== undefined) payload.currency = String((body as any).currency ?? 'PHP');
+
+  if ((body as any).fertilizerPlans !== undefined) {
+    const plans = normalizePlans((body as any).fertilizerPlans);
+    payload.fertilizerPlans = plans || [];
+  }
+
+  if ((body as any).daSchedule !== undefined) payload.daSchedule = (body as any).daSchedule;
+  if ((body as any).daCost !== undefined) payload.daCost = (body as any).daCost;
+  if ((body as any).npkClass !== undefined) payload.npkClass = String((body as any).npkClass ?? '');
+
+  const { data } = await api.patch(`/api/readings/${readingId}`, payload, {
+    headers: authHeaders(token || undefined),
+  });
   return data;
 }
 
 export async function deleteReading(
-  farmerId: string,
+  farmerId: string, // unused
   readingId: string,
   token?: string | null
 ): Promise<any> {
-  const { data } = await api.delete(
-    `/api/farmers/${farmerId}/readings/${readingId}`,
-    {
-      headers: authHeaders(token || undefined),
-    }
-  );
+  const { data } = await api.delete(`/api/readings/${readingId}`, {
+    headers: authHeaders(token || undefined),
+  });
   return data;
 }
 
-/* ===== Recommendation (normalized) ===== */
 
+/* ===== Recommendation (OLD normalized / IRRI style) ===== */
 export type RecommendPlanRow = {
   key: string;
   label: string;
@@ -413,8 +495,161 @@ export async function getRecommendation(
   return { ok: !!data?.ok, plans: [], updatedAt: data?.updatedAt };
 }
 
-/* ===== Forgot Password via Security Questions (username-based) ===== */
+/* ===== Recommendation (DA + Alternatives, cheapest-first) ===== */
 
+export type DaScheduleLine = { code: string; bags: number };
+
+export type DaSchedule = {
+  organic?: DaScheduleLine[];
+  basal?: DaScheduleLine[];
+  after30DAT?: DaScheduleLine[];
+  topdress60DBH?: DaScheduleLine[];
+};
+
+export type DaCostRow = {
+  phase: string; // "BASAL" | "30 DAT" | "TOPDRESS" etc.
+  code: string;
+  bags: number;
+  pricePerBag: number | null;
+  subtotal: number | null;
+};
+
+export type DaCost = {
+  currency: string;
+  rows: DaCostRow[];
+  total: number;
+};
+
+export type DaPlan = {
+  id: string;
+  title: string;
+  label: string;
+  isDa?: boolean;
+  isCheapest?: boolean;
+  schedule: DaSchedule;
+  cost: DaCost | null;
+};
+
+export type DaRecommendResponse = {
+  ok: boolean;
+  crop?: string;
+  input?: any;
+  classified?: {
+    N: 'L' | 'M' | 'H';
+    P: 'L' | 'M' | 'H';
+    K: 'L' | 'M' | 'H';
+    npkClass: string;
+  };
+  nutrientRequirementKgHa?: { N: number; P: number; K: number };
+
+  // backward compatible (older server)
+  schedule?: DaSchedule;
+  cost?: DaCost | null;
+
+  // ✅ new response
+  plans?: DaPlan[];
+  cheapest?: { id: string; total: number; currency: string } | null;
+
+  note?: string;
+};
+
+export type DaRecommendRequest = {
+  crop?: 'rice_hybrid' | string;
+  n?: number | null;
+  p?: number | null;
+  k?: number | null;
+  nClass?: 'L' | 'M' | 'H' | null;
+  pClass?: 'L' | 'M' | 'H' | null;
+  kClass?: 'L' | 'M' | 'H' | null;
+  areaHa?: number;
+};
+
+function normalizeDaSchedule(s: any): DaSchedule {
+  const normLines = (arr: any): DaScheduleLine[] =>
+    Array.isArray(arr)
+      ? arr
+          .map((x) => ({
+            code: String(x?.code ?? ''),
+            bags: Number(x?.bags ?? 0),
+          }))
+          .filter((x) => x.code)
+      : [];
+
+  return {
+    organic: normLines(s?.organic),
+    basal: normLines(s?.basal),
+    after30DAT: normLines(s?.after30DAT),
+    topdress60DBH: normLines(s?.topdress60DBH),
+  };
+}
+
+function normalizeDaCost(c: any): DaCost | null {
+  if (!c || typeof c !== 'object') return null;
+
+  const rows: DaCostRow[] = Array.isArray(c?.rows)
+    ? c.rows.map((r: any) => ({
+        phase: String(r?.phase ?? ''),
+        code: String(r?.code ?? ''),
+        bags: Number(r?.bags ?? 0),
+        pricePerBag: r?.pricePerBag == null ? null : Number(r.pricePerBag),
+        subtotal: r?.subtotal == null ? null : Number(r.subtotal),
+      }))
+    : [];
+
+  return {
+    currency: String(c?.currency || 'PHP'),
+    rows,
+    total: Number(c?.total || 0),
+  };
+}
+
+function normalizeDaPlan(p: any): DaPlan {
+  return {
+    id: String(p?.id || p?.code || ''),
+    title: String(p?.title || 'Fertilizer Plan'),
+    label: String(p?.label || 'Plan'),
+    isDa: !!p?.isDa,
+    isCheapest: !!p?.isCheapest,
+    schedule: normalizeDaSchedule(p?.schedule || {}),
+    cost: normalizeDaCost(p?.cost),
+  };
+}
+
+export async function getDaRecommendation(
+  token: string | undefined | null,
+  payload: DaRecommendRequest
+): Promise<DaRecommendResponse> {
+  const { data } = await api.post('/api/recommend', payload as any, {
+    headers: authHeaders(token || undefined),
+  });
+
+  const out: DaRecommendResponse = {
+    ok: !!data?.ok,
+    crop: data?.crop,
+    input: data?.input,
+    classified: data?.classified,
+    nutrientRequirementKgHa: data?.nutrientRequirementKgHa,
+    note: data?.note,
+
+    // backward compatible:
+    schedule: data?.schedule ? normalizeDaSchedule(data.schedule) : undefined,
+    cost: data?.cost ? normalizeDaCost(data.cost) : null,
+
+    // new:
+    plans: Array.isArray(data?.plans) ? data.plans.map(normalizeDaPlan) : undefined,
+    cheapest: data?.cheapest
+      ? {
+          id: String(data.cheapest.id || ''),
+          total: Number(data.cheapest.total || 0),
+          currency: String(data.cheapest.currency || 'PHP'),
+        }
+      : null,
+  };
+
+  return out;
+}
+
+/* ===== Forgot Password via Security Questions (username-based) ===== */
 export type SecurityQuestion = { index: number; question: string };
 
 export async function getSecurityQuestionsApi(

@@ -1,4 +1,4 @@
-// app/admin/screens/recommendation.tsx (ADMIN VERSION)
+// app/admin/screens/recommendation.tsx (ADMIN VERSION, MATCHING STAKEHOLDER LOGIC)
 
 import React from 'react';
 import {
@@ -10,7 +10,8 @@ import {
   Alert,
   StyleSheet,
 } from 'react-native';
-import { useRouter, useLocalSearchParams } from 'expo-router';
+import { useRouter } from 'expo-router';
+import { useFocusEffect } from '@react-navigation/native';
 import NetInfo from '@react-native-community/netinfo';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
@@ -22,51 +23,60 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth } from '../../../context/AuthContext';
 import { useFertilizer } from '../../../context/FertilizerContext';
 import { useReadingSession } from '../../../context/ReadingSessionContext';
-import { useData } from '../../../context/DataContext';
 
 /* services */
 import {
   addReading,
   addStandaloneReading,
-  getRecommendation,
 } from '../../../src/services';
 
 /* ------------------ constants ------------------ */
 const SACK_WEIGHT_KG = 50;
-const TARGET_N_KG_HA = 120;
-const TARGET_P_KG_HA = 40;
-const TARGET_K_KG_HA = 80;
 
+// ------------- classification thresholds (ppm) -------------
+const classifyLevel = (ppm: number): 'LOW' | 'MEDIUM' | 'HIGH' => {
+  if (ppm < 117) return 'LOW';     // 0–116.9
+  if (ppm <= 235) return 'MEDIUM'; // 117–235
+  return 'HIGH';                   // >235
+};
+
+// ------------- helpers for prices / labels -------------
 const priceOf = (
   prices: Record<string, any> | null | undefined,
-  code: string
-) => prices?.[code]?.pricePerBag ?? 0;
+  code: string | null | undefined
+) => (code && prices?.[code]?.pricePerBag) ?? 0;
+
 const labelOf = (
   prices: Record<string, any> | null | undefined,
-  code: string
-) => prices?.[code]?.label ?? code;
+  code: string | null | undefined
+) => {
+  if (!code) return 'Unknown';
+  return prices?.[code]?.label ?? code;
+};
+
+// find fertilizer code automatically by looking at label + code text
+const findFertCode = (
+  prices: Record<string, any> | null | undefined,
+  patterns: string[]
+): string | null => {
+  if (!prices) return null;
+  const entries = Object.entries(prices);
+  const lowerPatterns = patterns.map((p) => p.toLowerCase());
+
+  for (const [code, item] of entries) {
+    const haystack = `${code} ${item?.label ?? ''}`.toLowerCase();
+    if (lowerPatterns.some((p) => haystack.includes(p))) {
+      return code;
+    }
+  }
+  return null;
+};
 
 const isObjectId = (s?: string) => !!s && /^[a-f0-9]{24}$/i.test(s);
 
-/* 🔁 SAME PREFIX THAT logs.tsx USES */
+/* 🔁 SAME PREFIX THAT logs.tsx USES (kept from your original admin file) */
 const READINGS_CACHE_PREFIX = 'fertisense:readings:';
 
-type ServerPlanRow = {
-  key: string;
-  label: string;
-  bags: number;
-  pricePerBag: number;
-  subtotal: number;
-};
-type ServerPlan = {
-  code: string;
-  title: string;
-  rows: ServerPlanRow[];
-  total: number;
-  currency: string;
-};
-
-/* helper: append one reading to this farmer's log cache */
 async function appendReadingToFarmerCache(fid: string, reading: any) {
   try {
     const key = READINGS_CACHE_PREFIX + fid;
@@ -80,10 +90,8 @@ async function appendReadingToFarmerCache(fid: string, reading: any) {
   }
 }
 
-const isNonEmpty = (v: any): v is string =>
-  typeof v === 'string' && v.trim().length > 0;
-
-export default function RecommendationScreen() {
+/* ------------------ main component ------------------ */
+export default function AdminRecommendationScreen() {
   const router = useRouter();
   const { token, user } = useAuth();
   const {
@@ -92,158 +100,172 @@ export default function RecommendationScreen() {
     loading: pricesLoading,
     refetchPrices,
   } = useFertilizer();
-
-  // ✅ averaged result from ESP32 (set by AdminSensorReadingScreen)
-  const { latestSensorData } = useData();
-
-  // ✅ last reading session (stored in AsyncStorage)
   const { result: session } = useReadingSession();
 
-  // ✅ params (can be farmerId + farmerName OR farmerId + name)
-  const params = useLocalSearchParams<{
-    farmerId?: string;
-    farmerName?: string;
-    name?: string;
-  }>();
-
-  const safeNum = (v: any, fallback = 0) =>
-    typeof v === 'number' && !Number.isNaN(v) ? v : fallback;
-
-  /* ------- resolve farmer identity (ID + name) ------- */
-
-  const farmerIdFromParams = isNonEmpty(params.farmerId)
-    ? params.farmerId.trim()
-    : undefined;
-
-  const farmerNameFromParams = isNonEmpty(params.farmerName)
-    ? params.farmerName.trim()
-    : isNonEmpty(params.name)
-    ? params.name.trim()
-    : undefined;
-
-  // 👇 MAIN SOURCE OF TRUTH:
-  //  1) latestSensorData  (just-read admin flow)
-  //  2) URL params        (farmerId + name / farmerName)
-  //  3) session           (old fallback)
-  const farmerId: string =
-    (latestSensorData?.farmerId as string | undefined) ||
-    farmerIdFromParams ||
-    (session?.farmerId as string | undefined) ||
-    '';
-
-  const farmerName: string =
-    (latestSensorData?.farmerName as string | undefined) ||
-    farmerNameFromParams ||
-    (session?.farmerName as string | undefined) ||
-    '';
-
-  // 🔍 debug trace – will show up in Metro logs
-  console.log('[AdminRecommendation] farmerId used:', farmerId);
-  console.log('[AdminRecommendation] from params:', farmerIdFromParams);
-  console.log(
-    '[AdminRecommendation] from latestSensorData:',
-    latestSensorData?.farmerId
-  );
-  console.log('[AdminRecommendation] from session:', session?.farmerId);
-
-  // Prefer averaged values from latestSensorData; fallback to session values
-  const nValue = safeNum(
-    (latestSensorData as any)?.n ?? (session as any)?.n,
-    0
-  );
-  const pValue = safeNum(
-    (latestSensorData as any)?.p ?? (session as any)?.p,
-    0
-  );
-  const kValue = safeNum(
-    (latestSensorData as any)?.k ?? (session as any)?.k,
-    0
-  );
-  const phValue = safeNum(
-    (latestSensorData as any)?.ph ?? (session as any)?.ph,
-    6.5
-  );
-
+  // ------- resolve live values from ReadingSession (same as stakeholder) -------
+  const farmerId = session?.farmerId ?? '';
+  const farmerName = session?.farmerName ?? '';
+  const nValue = session?.n ?? 0; // ppm
+  const pValue = session?.p ?? 0; // ppm
+  const kValue = session?.k ?? 0; // ppm
+  const phValue = session?.ph ?? 6.5;
   const phStatus =
     phValue < 5.5 ? 'Acidic' : phValue > 7.5 ? 'Alkaline' : 'Neutral';
 
-  /* ------- narrative ------- */
+  // NPK levels (LOW / MEDIUM / HIGH)
+  const levelN = classifyLevel(nValue);
+  const levelP = classifyLevel(pValue);
+  const levelK = classifyLevel(kValue);
+
+  // ------- nutrient text (which elements are LOW?) -------
+  const neededNutrients: string[] = [];
+  if (levelN === 'LOW') neededNutrients.push('Nitrogen');
+  if (levelP === 'LOW') neededNutrients.push('Phosphorus');
+  if (levelK === 'LOW') neededNutrients.push('Potassium');
+
+  const neededStrEN =
+    neededNutrients.length === 0
+      ? 'no major additional nutrients'
+      : neededNutrients.join(', ').replace(/, ([^,]*)$/, ' and $1');
+
+  const neededStrTL =
+    neededNutrients.length === 0
+      ? 'walay kulang nga nutriyente'
+      : neededNutrients.join(', ').replace(/, ([^,]*)$/, ' ug $1');
+
+  // ------- narrative (same style as stakeholder) -------
   const recommendationText =
-    `Base sa datos, ang lupa ay nangangailangan ng` +
-    `${nValue < TARGET_N_KG_HA ? ' Nitrogen' : ''}` +
-    `${pValue < TARGET_P_KG_HA ? ' Phosphorus' : ''}` +
-    `${kValue < TARGET_K_KG_HA ? ' Potassium' : ''}. ` +
-    `Gumamit ng` +
-    `${nValue < TARGET_N_KG_HA ? ' Urea' : ''}` +
-    `${pValue < TARGET_P_KG_HA ? ' SSP o DAP' : ''}.`;
+    `Base sa datos, ang lupa ay nangangalangan og ${neededStrTL}. ` +
+    `Gamiton ang mga rekomendadong LGU fertilizer options sa ubos para sa 1 ka ektarya sa Hybrid rice.`;
 
   const englishText =
-    `Based on the reading, the soil requires` +
-    `${nValue < TARGET_N_KG_HA ? ' Nitrogen' : ''}` +
-    `${pValue < TARGET_P_KG_HA ? ' Phosphorus' : ''}` +
-    `${kValue < TARGET_K_KG_HA ? ' Potassium' : ''}. ` +
-    `Use` +
-    `${nValue < TARGET_N_KG_HA ? ' Urea' : ''}` +
-    `${pValue < TARGET_P_KG_HA ? ' SSP/DAP' : ''}.`;
+    `Based on the reading, the soil needs ${neededStrEN}. ` +
+    `You may follow the LGU fertilizer options below for 1 hectare of hybrid rice.`;
 
-  /* ------- client-side plan math (kg/ha → kg fertilizer) ------- */
-  const calculateFertilizerNeeded = (needKg: number, pct: number) =>
-    needKg <= 0 || pct === 0 ? 0 : needKg / (pct / 100);
-
-  const fertilizerAmounts = React.useMemo(() => {
-    const dN = Math.max(0, TARGET_N_KG_HA - nValue);
-    const dP = Math.max(0, TARGET_P_KG_HA - pValue);
-    const dK = Math.max(0, TARGET_K_KG_HA - kValue);
-
-    // Plan 1: UREA + SSP + MOP
-    const ureaKg = calculateFertilizerNeeded(dN, 46);
-    const sspKg = calculateFertilizerNeeded(dP, 16);
-    const mopKg = calculateFertilizerNeeded(dK, 60);
-
-    // Plan 2: DAP + UREA + MOP
-    const dapKg = calculateFertilizerNeeded(dP, 46);
-    const dN_after_dap = Math.max(0, dN - dapKg * 0.18);
-    const urea2Kg = calculateFertilizerNeeded(dN_after_dap, 46);
-    const mop2Kg = calculateFertilizerNeeded(dK, 60);
-
-    // Plan 3: NPK 14-14-14 + UREA
-    const npkBase = Math.max(dN / 0.14, dP / 0.14, dK / 0.14);
-    const npkKg = Math.ceil(npkBase);
-    const dN_after_npk = Math.max(0, dN - npkKg * 0.14);
-    const urea3Kg = calculateFertilizerNeeded(dN_after_npk, 46);
-
+  // ------- resolve fertilizer codes from price list (same as stakeholder) -------
+  const fertCodes = React.useMemo(() => {
+    const p = adminPrices;
     return {
-      plan1: { UREA_46_0_0: ureaKg, SSP_0_16_0: sspKg, MOP_0_0_60: mopKg },
-      plan2: { DAP_18_46_0: dapKg, UREA_46_0_0: urea2Kg, MOP_0_0_60: mop2Kg },
-      plan3: { NPK_14_14_14: npkKg, UREA_46_0_0: urea3Kg },
-    } as Record<string, Record<string, number>>;
-  }, [nValue, pValue, kValue]);
+      urea: findFertCode(p, ['46-0-0', '46_0_0', 'urea']),
+      mop: findFertCode(p, ['0-0-60', '0_0_60', 'mop', 'potash']),
+      dap: findFertCode(p, ['18-46-0', '18_46_0', 'dap']),
+      complete141414: findFertCode(p, ['14-14-14', '14_14_14', 'complete']),
+      npk16200: findFertCode(p, ['16-20-0', '16_20_0']),
+      n2100: findFertCode(p, ['21-0-0', '21_0_0']),
+    };
+  }, [adminPrices]);
 
-  const clientPlans = React.useMemo(() => {
-    const entries = Object.entries(fertilizerAmounts);
-    return entries.map(([key, items], idx) => {
-      const total = Object.entries(items).reduce((sum, [code, kg]) => {
-        const bags = Math.ceil((kg as number) / SACK_WEIGHT_KG);
-        return sum + bags * priceOf(adminPrices, code);
-      }, 0);
-      return { key, items, total, idx };
-    });
-  }, [fertilizerAmounts, adminPrices]);
+  type LguPlan = {
+    code: string; // e.g. "OPT1"
+    title: string; // "LGU Option 1"
+    bagsByFert: Record<string, number>; // fertCode -> bags/ha
+    total: number; // total PHP/ha
+  };
 
-  /* ------- cloud + server plans ------- */
-  const [postStatus, setPostStatus] = React.useState<
-    'pending' | 'saving' | 'saved' | 'failed'
-  >('pending');
-  const onceRef = React.useRef(false);
-  const isFetchingRef = React.useRef(false);
-  const [serverPlans, setServerPlans] = React.useState<ServerPlan[] | null>(
-    null
+  // ------- LGU plans based on agriculture paper (copied from stakeholder) -------
+  const lguPlans: LguPlan[] = React.useMemo(() => {
+    const { urea, mop, dap, complete141414, npk16200, n2100 } = fertCodes;
+    const plans: LguPlan[] = [];
+
+    // Option 1: 18-46-0 (DAP) 3.00 + 0-0-60 (MOP) 2.33 + 46-0-0 (Urea) 4.43
+    if (dap && mop && urea) {
+      const bags = {
+        [dap]: 3.0,
+        [mop]: 2.33,
+        [urea]: 4.43,
+      };
+      const total =
+        bags[dap] * priceOf(adminPrices, dap) +
+        bags[mop] * priceOf(adminPrices, mop) +
+        bags[urea] * priceOf(adminPrices, urea);
+
+      plans.push({
+        code: 'OPT1',
+        title: 'LGU Option 1',
+        bagsByFert: bags,
+        total,
+      });
+    }
+
+    // Option 2: 16-20-0 7.00 + 0-0-60 2.33 + 46-0-0 4.52
+    if (npk16200 && mop && urea) {
+      const bags = {
+        [npk16200]: 7.0,
+        [mop]: 2.33,
+        [urea]: 4.52,
+      };
+      const total =
+        bags[npk16200] * priceOf(adminPrices, npk16200) +
+        bags[mop] * priceOf(adminPrices, mop) +
+        bags[urea] * priceOf(adminPrices, urea);
+
+      plans.push({
+        code: 'OPT2',
+        title: 'LGU Option 2',
+        bagsByFert: bags,
+        total,
+      });
+    }
+
+    // Option 3: 14-14-14 10.00 + 46-0-0 4.52
+    if (complete141414 && urea) {
+      const bags = {
+        [complete141414]: 10.0,
+        [urea]: 4.52,
+      };
+      const total =
+        bags[complete141414] * priceOf(adminPrices, complete141414) +
+        bags[urea] * priceOf(adminPrices, urea);
+
+      plans.push({
+        code: 'OPT3',
+        title: 'LGU Option 3',
+        bagsByFert: bags,
+        total,
+      });
+    }
+
+    // Option 4: 14-14-14 10.00 + 21-0-0 10.00
+    if (complete141414 && n2100) {
+      const bags = {
+        [complete141414]: 10.0,
+        [n2100]: 10.0,
+      };
+      const total =
+        bags[complete141414] * priceOf(adminPrices, complete141414) +
+        bags[n2100] * priceOf(adminPrices, n2100);
+
+      plans.push({
+        code: 'OPT4',
+        title: 'LGU Option 4',
+        bagsByFert: bags,
+        total,
+      });
+    }
+
+    return plans;
+  }, [adminPrices, fertCodes]);
+
+  // ------- shared history plans (for local + backend) -------
+  const historyPlans = React.useMemo(
+    () =>
+      lguPlans.map((plan) => {
+        const details = Object.entries(plan.bagsByFert).map(([code, bags]) => {
+          const kg = (bags as number) * SACK_WEIGHT_KG;
+          return `${labelOf(adminPrices, code)}: ${bags.toFixed(
+            2
+          )} bags (${kg.toFixed(2)} kg)`;
+        });
+        return {
+          name: `${plan.title}`,
+          cost: `${currency} ${plan.total.toFixed(2)}`,
+          details,
+        };
+      }),
+    [lguPlans, adminPrices, currency]
   );
-  const [serverNarrative, setServerNarrative] = React.useState<{
-    en?: string;
-    tl?: string;
-  } | null>(null);
 
+  // ------- local history save (using LGU plans) -------
   const persistLocalHistory = React.useCallback(async () => {
     if (!user?._id) return;
     try {
@@ -253,21 +275,7 @@ export default function RecommendationScreen() {
         month: 'long',
         day: 'numeric',
       });
-      const phStr = `${phValue.toFixed(2)} (${phStatus})`;
-
-      const historyPlans = clientPlans.map(({ items, total }, idx) => {
-        const details = Object.entries(items).map(([code, kg]) => {
-          const bags = Math.ceil((kg as number) / SACK_WEIGHT_KG);
-          return `${labelOf(adminPrices, code)}: ${bags} bags (${(
-            kg as number
-          ).toFixed(2)} kg)`;
-        });
-        return {
-          name: `Recommendation ${idx + 1}`,
-          cost: `${currency} ${total.toFixed(2)}`,
-          details,
-        };
-      });
+      const phStr = `${phValue.toFixed(1)} (${phStatus})`;
 
       const newItem = {
         id: `reading_${Date.now()}_${Math.random()
@@ -293,9 +301,6 @@ export default function RecommendationScreen() {
     }
   }, [
     user?._id,
-    clientPlans,
-    adminPrices,
-    currency,
     nValue,
     pValue,
     kValue,
@@ -303,13 +308,21 @@ export default function RecommendationScreen() {
     phStatus,
     recommendationText,
     englishText,
+    historyPlans,
     farmerId,
     farmerName,
   ]);
 
-  const saveAndFetch = React.useCallback(async () => {
-    if (postStatus !== 'pending' || isFetchingRef.current) return;
-    isFetchingRef.current = true;
+  // ------- save reading to backend (with recommendation) -------
+  const [postStatus, setPostStatus] = React.useState<
+    'pending' | 'saving' | 'saved' | 'failed'
+  >('pending');
+  const onceRef = React.useRef(false);
+  const isSavingRef = React.useRef(false);
+
+  const saveReading = React.useCallback(async () => {
+    if (postStatus !== 'pending' || isSavingRef.current) return;
+    isSavingRef.current = true;
     setPostStatus('saving');
 
     const createdAtIso = new Date().toISOString();
@@ -323,59 +336,31 @@ export default function RecommendationScreen() {
           ? false
           : !!net.isConnected;
 
-      if (!online) {
-        console.warn('Offline: skipping cloud save.');
-      } else if (!token) {
-        console.warn('Missing token: skipping cloud save.');
+      if (!online || !token) {
+        console.warn('Offline or no token: skipping cloud save.');
       } else {
-        // ✅ ADMIN path: save reading with farmerId so logs can group by farmer
+        const payload = {
+          N: nValue,
+          P: pValue,
+          K: kValue,
+          ph: phValue,
+          source: 'esp32',
+
+          // send narrative + plans to backend
+          recommendationText,
+          englishText,
+          fertilizerPlans: historyPlans,
+          currency,
+        };
+
         if (farmerId && isObjectId(farmerId)) {
-          await addReading(
-            {
-              farmerId,
-              N: nValue,
-              P: pValue,
-              K: kValue,
-              ph: phValue,
-              source: 'esp32',
-            },
-            token
-          );
+          await addReading({ ...payload, farmerId }, token);
         } else {
-          // fallback (rare in admin flow / offline local farmer)
-          await addStandaloneReading(
-            {
-              N: nValue,
-              P: pValue,
-              K: kValue,
-              ph: phValue,
-              source: 'esp32',
-            },
-            token
-          );
-        }
-
-        try {
-          const rec = await getRecommendation(token, {
-            n: nValue,
-            p: pValue,
-            k: kValue,
-            ph: phValue,
-            areaHa: 1,
-          });
-
-          if (Array.isArray(rec?.plans)) {
-            setServerPlans(rec.plans as ServerPlan[]);
-          }
-          if (rec?.narrative) {
-            setServerNarrative(rec.narrative as { en?: string; tl?: string });
-          }
-        } catch (e) {
-          console.warn('[recommendation] fetch warn:', e);
+          await addStandaloneReading(payload, token);
         }
       }
 
-      // ✅ also write to per-farmer log cache used by logs.tsx
+      // ✅ also write to per-farmer log cache used by logs.tsx (admin-only extra)
       if (farmerId) {
         const mappedForLogs = {
           farmerId,
@@ -393,15 +378,12 @@ export default function RecommendationScreen() {
         await appendReadingToFarmerCache(farmerId, mappedForLogs);
       }
 
-      // optional: keep your per-user history
       await persistLocalHistory();
-
       setPostStatus('saved');
     } catch (e: any) {
       console.error('save error:', e?.message || e);
       await persistLocalHistory();
 
-      // still try to push to farmer cache offline if we know farmerId
       if (farmerId) {
         const mappedForLogs = {
           farmerId,
@@ -422,7 +404,7 @@ export default function RecommendationScreen() {
       setPostStatus('failed');
       Alert.alert('Save Error', e?.message || 'Could not save reading.');
     } finally {
-      isFetchingRef.current = false;
+      isSavingRef.current = false;
     }
   }, [
     postStatus,
@@ -432,39 +414,24 @@ export default function RecommendationScreen() {
     pValue,
     kValue,
     phValue,
+    recommendationText,
+    englishText,
+    historyPlans,
+    currency,
     persistLocalHistory,
   ]);
 
-  // 🔴 IMPORTANT:
-  // Wait until we ACTUALLY have N/P/K/pH before saving the first time.
-  React.useEffect(() => {
-    if (onceRef.current) return;
+  useFocusEffect(
+    React.useCallback(() => {
+      if (!onceRef.current) {
+        onceRef.current = true;
+        refetchPrices?.();
+        saveReading();
+      }
+    }, [refetchPrices, saveReading])
+  );
 
-    const hasFromSensor =
-      latestSensorData &&
-      (typeof (latestSensorData as any).n === 'number' ||
-        typeof (latestSensorData as any).p === 'number' ||
-        typeof (latestSensorData as any).k === 'number' ||
-        typeof (latestSensorData as any).ph === 'number');
-
-    const hasFromSession =
-      session &&
-      (typeof (session as any).n === 'number' ||
-        typeof (session as any).p === 'number' ||
-        typeof (session as any).k === 'number' ||
-        typeof (session as any).ph === 'number');
-
-    if (!hasFromSensor && !hasFromSession) {
-      // still empty, don't save yet
-      return;
-    }
-
-    onceRef.current = true;
-    refetchPrices?.();
-    saveAndFetch();
-  }, [latestSensorData, session, refetchPrices, saveAndFetch]);
-
-  /* ------- PDF (unchanged except farmerId now correct) ------- */
+  // ------- PDF (only LGU plans, same style as stakeholder but ADMIN filename) -------
   const [pdfBusy, setPdfBusy] = React.useState(false);
 
   const handleSavePDF = React.useCallback(async () => {
@@ -481,60 +448,36 @@ export default function RecommendationScreen() {
         maximumFractionDigits: 2,
       });
 
-    const clientHtml = clientPlans
-      .map(({ items, total }, idx) => {
-        const rows = Object.entries(items)
-          .map(([code, kg]) => {
-            const totalBags = Math.ceil((kg as number) / SACK_WEIGHT_KG);
+    const plansHtml = lguPlans
+      .map((plan, idx) => {
+        const rows = Object.entries(plan.bagsByFert)
+          .map(([code, bags]) => {
             const price = priceOf(adminPrices, code);
-            const subtotal = totalBags * price;
-            return `<tr><td>${labelOf(
-              adminPrices,
-              code
-            )}</td><td style="text-align:right;">${totalBags} bags (${(
-              kg as number
-            ).toFixed(
-              2
-            )} kg)</td><td style="text-align:right;">${currency} ${money(
-              subtotal
-            )}</td></tr>`;
+            const subtotal = (bags as number) * price;
+            return `<tr>
+              <td>${labelOf(adminPrices, code)}</td>
+              <td style="text-align:right;">${(bags as number).toFixed(
+                2
+              )} bags</td>
+              <td style="text-align:right;">${currency} ${money(
+                subtotal
+              )}</td>
+            </tr>`;
           })
           .join('');
-        return `
-          <div style="margin-top:18px;">
-            <div class="hdr">
-              <span>Client Plan ${idx + 1}</span>
-              <span>${currency} ${money(total)}</span>
-            </div>
-            <table>
-              <tr><th>Fertilizer</th><th style="text-align:right;">Amount (Bags/kg)</th><th style="text-align:right;">Subtotal</th></tr>
-              ${rows}
-            </table>
-          </div>
-        `;
-      })
-      .join('');
 
-    const serverHtml = (serverPlans ?? [])
-      .map((p, idx) => {
-        const rows = p.rows
-          .map(
-            (r) =>
-              `<tr><td>${r.label}</td><td style="text-align:right;">${
-                r.bags
-              } bags</td><td style="text-align:right;">${currency} ${money(
-                r.subtotal
-              )}</td></tr>`
-          )
-          .join('');
         return `
           <div style="margin-top:18px;">
             <div class="hdr">
-              <span>LGU Plan ${idx + 1}</span>
-              <span>${currency} ${money(p.total)}</span>
+              <span>${plan.title}</span>
+              <span>${currency} ${money(plan.total)}</span>
             </div>
             <table>
-              <tr><th>Fertilizer</th><th style="text-align:right;">Bags</th><th style="text-align:right;">Subtotal</th></tr>
+              <tr>
+                <th>Fertilizer</th>
+                <th style="text-align:right;">Bags/ha</th>
+                <th style="text-align:right;">Subtotal</th>
+              </tr>
               ${rows}
             </table>
           </div>
@@ -561,11 +504,13 @@ export default function RecommendationScreen() {
         <body>
           <h1>🌱 Fertilizer Report (Admin)</h1>
           <p><b>📅 Date:</b> ${ymd}</p>
-          <p><b>👤 Farmer:</b> ${farmerName || '(unknown)'} (${farmerId || 'no-id'})</p>
+          <p><b>👤 Farmer:</b> ${farmerName || '(unknown)'} ${
+      farmerId ? `(ID: ${farmerId})` : ''
+    }</p>
 
           <h3>📟 Reading Results</h3>
           <div class="box">
-            <p><b>pH:</b> ${phValue.toFixed(2)} (${phStatus})</p>
+            <p><b>pH:</b> ${phValue.toFixed(1)} (${phStatus})</p>
             <p><b>N:</b> ${nValue} &nbsp; <b>P:</b> ${pValue} &nbsp; <b>K:</b> ${kValue}</p>
           </div>
 
@@ -575,16 +520,10 @@ export default function RecommendationScreen() {
             <p style="font-style:italic;color:#555;">${englishText}</p>
           </div>
 
-          <h3>✅ Client Plans</h3>
-          ${clientHtml}
+          <h3>🏛️ LGU Fertilizer Options (per hectare)</h3>
+          ${plansHtml}
 
-          ${
-            (serverPlans?.length ?? 0) > 0
-              ? `<h3>🏛️ LGU Plans</h3>${serverHtml}`
-              : ''
-          }
-
-          <div class="footer">Admin Report • ${today.getFullYear()}</div>
+          <div class="footer">FertiSense Admin • ${today.getFullYear()}</div>
         </body>
       </html>
     `;
@@ -611,8 +550,7 @@ export default function RecommendationScreen() {
   }, [
     pdfBusy,
     adminPrices,
-    clientPlans,
-    serverPlans,
+    lguPlans,
     currency,
     farmerName,
     farmerId,
@@ -625,12 +563,12 @@ export default function RecommendationScreen() {
     englishText,
   ]);
 
-  /* ------------------ UI ------------------ */
+  /* ------------------ UI (mirroring stakeholder) ------------------ */
   return (
     <ScrollView contentContainerStyle={styles.container}>
       <Image
         source={require('../../../assets/images/fertisense-logo.png')}
-        style={styles.logo}
+        style={styles.logo as any}
         resizeMode="contain"
       />
 
@@ -638,24 +576,26 @@ export default function RecommendationScreen() {
       <View style={styles.readBox}>
         <Text style={styles.readTitle}>📟 Reading Results</Text>
         <Text style={styles.readLine}>
-          <Text style={styles.bold}>pH:</Text> {phValue.toFixed(2)} ({phStatus})
+          <Text style={styles.bold}>pH:</Text> {phValue.toFixed(1)} ({phStatus})
         </Text>
         <Text style={styles.readLine}>
-          <Text style={styles.bold}>N:</Text> {nValue}{'  '}
-          <Text style={styles.bold}>P:</Text> {pValue}{'  '}
-          <Text style={styles.bold}>K:</Text> {kValue}
+          <Text style={styles.bold}>N:</Text> {nValue} ({levelN}){'  '}
+          <Text style={styles.bold}>P:</Text> {pValue} ({levelP}){'  '}
+          <Text style={styles.bold}>K:</Text> {kValue} ({levelK})
         </Text>
         {!!farmerName && (
           <Text style={styles.readSubtle}>
             Farmer: {farmerName}{' '}
-            <Text style={{ fontSize: 11, color: '#999' }}>
-              (ID: {farmerId || 'none'})
-            </Text>
+            {farmerId ? (
+              <Text style={{ fontSize: 11, color: '#999' }}>
+                (ID: {farmerId})
+              </Text>
+            ) : null}
           </Text>
         )}
       </View>
 
-      {/* NARRATIVE */}
+      {/* LOCAL NARRATIVE */}
       <View style={styles.recommendationBox}>
         <Text style={styles.recommendationTitle}>
           Rekomendasyon:{' '}
@@ -666,7 +606,7 @@ export default function RecommendationScreen() {
       </View>
 
       <View style={styles.divider} />
-      <Text style={styles.sectionTitle}>Fertilizer Recommendations</Text>
+      <Text style={styles.sectionTitle}>LGU Fertilizer Recommendations</Text>
 
       {pricesLoading && (
         <Text
@@ -680,55 +620,56 @@ export default function RecommendationScreen() {
         </Text>
       )}
 
-      {/* CLIENT PLANS */}
-      {clientPlans.map(({ key, items, total }, idx) => (
-        <View key={key} style={styles.table}>
+      {/* LGU PLANS (same table layout as stakeholder) */}
+      {lguPlans.map((plan, idx) => (
+        <View key={plan.code} style={styles.table}>
           <View style={styles.tableHeader}>
-            <Text style={styles.tableTitle}>Client Plan – {idx + 1}</Text>
+            <Text style={styles.tableTitle}>
+              {plan.title} – {idx + 1}
+            </Text>
             <Text style={styles.priceTag}>
-              {currency} {(total || 0).toFixed(2)}
+              {currency} {(plan.total || 0).toFixed(2)}
             </Text>
           </View>
 
           {/* header row */}
           <View style={styles.tableRow}>
             <Text style={[styles.cellHeader, { flex: 2 }]}>Stages</Text>
-            {Object.keys(items).map((code) => (
+            {Object.keys(plan.bagsByFert).map((code) => (
               <Text key={`hdr-${code}`} style={styles.cellHeader}>
                 {labelOf(adminPrices, code)}
               </Text>
             ))}
           </View>
 
-          {/* planting row: half of Urea, full P/K */}
+          {/* planting row */}
           <View style={styles.tableRow}>
             <Text style={[styles.cell, { flex: 2 }]}>Sa Pagtanim</Text>
-            {Object.entries(items).map(([code, kg]) => {
-              const totalBags = Math.ceil((kg as number) / SACK_WEIGHT_KG);
-              const bagsAtPlanting = code.includes('UREA')
-                ? Math.round(totalBags / 2)
-                : totalBags;
+            {Object.entries(plan.bagsByFert).map(([code, bags]) => {
+              // simple rule: all non-urea at planting; urea is split 50/50
+              const isUrea = code === fertCodes.urea;
+              const plantingBags = isUrea
+                ? (bags as number) / 2
+                : (bags as number);
               return (
                 <Text key={`plant-${code}`} style={styles.cell}>
-                  {bagsAtPlanting}
+                  {plantingBags.toFixed(2)}
                 </Text>
               );
             })}
           </View>
 
-          {/* 30d row: remaining Urea */}
+          {/* 30d row */}
           <View style={styles.tableRow}>
             <Text style={[styles.cell, { flex: 2 }]}>
               Pagkatapos ng 30 Araw
             </Text>
-            {Object.entries(items).map(([code, kg]) => {
-              const totalBags = Math.ceil((kg as number) / SACK_WEIGHT_KG);
-              const bagsAt30Days = code.includes('UREA')
-                ? totalBags - Math.round(totalBags / 2)
-                : 0;
+            {Object.entries(plan.bagsByFert).map(([code, bags]) => {
+              const isUrea = code === fertCodes.urea;
+              const after30 = isUrea ? (bags as number) / 2 : 0;
               return (
                 <Text key={`30d-${code}`} style={styles.cell}>
-                  {bagsAt30Days}
+                  {after30.toFixed(2)}
                 </Text>
               );
             })}
@@ -737,54 +678,14 @@ export default function RecommendationScreen() {
           {/* totals */}
           <View style={[styles.tableRow, styles.tableFooter]}>
             <Text style={[styles.cellHeader, { flex: 2 }]}>Total Bags</Text>
-            {Object.entries(items).map(([code, kg]) => (
+            {Object.entries(plan.bagsByFert).map(([code, bags]) => (
               <Text key={`tot-${code}`} style={styles.cellHeader}>
-                {Math.ceil((kg as number) / SACK_WEIGHT_KG)}
+                {(bags as number).toFixed(2)}
               </Text>
             ))}
           </View>
         </View>
       ))}
-
-      {/* SERVER (LGU) PLANS */}
-      {(serverPlans?.length ?? 0) > 0 && (
-        <>
-          <Text style={[styles.sectionTitle, { marginTop: 10 }]}>
-            LGU Plans (Server)
-          </Text>
-          {serverNarrative?.tl && (
-            <Text style={styles.narrativeTL}>{serverNarrative.tl}</Text>
-          )}
-          {serverNarrative?.en && (
-            <Text style={styles.narrativeEN}>{serverNarrative.en}</Text>
-          )}
-
-          {serverPlans!.map((p, idx) => (
-            <View key={p.code} style={styles.table}>
-              <View style={styles.tableHeader}>
-                <Text style={styles.tableTitle}>LGU Plan – {idx + 1}</Text>
-                <Text style={styles.priceTag}>
-                  {currency} {(p.total || 0).toFixed(2)}
-                </Text>
-              </View>
-              <View style={styles.tableRow}>
-                <Text style={[styles.cellHeader, { flex: 2 }]}>Fertilizer</Text>
-                <Text style={styles.cellHeader}>Bags</Text>
-                <Text style={styles.cellHeader}>Subtotal</Text>
-              </View>
-              {p.rows.map((r) => (
-                <View key={`${p.code}-${r.key}`} style={styles.tableRow}>
-                  <Text style={[styles.cell, { flex: 2 }]}>{r.label}</Text>
-                  <Text style={styles.cell}>{r.bags}</Text>
-                  <Text style={styles.cell}>
-                    {currency} {r.subtotal.toFixed(2)}
-                  </Text>
-                </View>
-              ))}
-            </View>
-          ))}
-        </>
-      )}
 
       <View style={styles.downloadToggle}>
         <Text style={styles.downloadLabel}>Save a copy</Text>
@@ -813,7 +714,7 @@ export default function RecommendationScreen() {
   );
 }
 
-/* ------------------ styles ------------------ */
+/* ------------------ styles (mostly same as stakeholder) ------------------ */
 const styles = StyleSheet.create({
   container: {
     padding: 23,
@@ -918,14 +819,6 @@ const styles = StyleSheet.create({
   downloadLabel: { color: '#444', fontSize: 13 },
   downloadButton: { fontSize: 15, color: '#550909', fontWeight: 'bold' },
   disabledText: { color: '#aaa' },
-
-  narrativeTL: { fontSize: 13, color: '#333', marginBottom: 6 },
-  narrativeEN: {
-    fontSize: 12,
-    color: '#555',
-    fontStyle: 'italic',
-    marginBottom: 10,
-  },
 
   button: {
     backgroundColor: '#2e7d32',

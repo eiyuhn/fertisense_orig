@@ -6,7 +6,7 @@ export default function SupportScreen() {
   const router = useRouter();
 
   const openEmail = () => {
-    Linking.openURL('mailto:fertisense.support@example.com?subject=Fertisense Support');
+    Linking.openURL('mailto:fertisensecc@gmail.com?subject=Fertisense Support');
   };
 
   return (

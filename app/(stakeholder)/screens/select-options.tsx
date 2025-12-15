@@ -17,11 +17,11 @@ export default function SelectOptionsScreen() {
   const { farmerId } = useLocalSearchParams<{ farmerId?: string }>(); // Get farmerId if passed
 
   const [riceType, setRiceType] = useState<string | null>(null);
-  const [cropStyle, setCropStyle] = useState('');
+  
   const [soilType, setSoilType] = useState('');
   const [season, setSeason] = useState('');
 
-  const allSelected = riceType && cropStyle && soilType && season;
+  const allSelected = riceType && soilType && season;
 
   const handleProceed = () => {
     // Pass farmerId along to the sensor reading screen
@@ -49,7 +49,7 @@ export default function SelectOptionsScreen() {
 
         {/* URI NG PALAY */}
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>🌾 Uri ng Palay</Text>
+          <Text style={styles.cardTitle}>🌾 Klase sa Humay </Text>
           <View style={styles.optionsRow}>
             {['Hybrid', 'Inbred', 'Pareho'].map((type) => {
               const selected = riceType === type.toLowerCase();
@@ -68,26 +68,9 @@ export default function SelectOptionsScreen() {
           </View>
         </View>
 
-        {/* ESTILO NG SAKAHAN */}
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>💧 Estilo ng Sakahan</Text>
-          <View style={[styles.pickerWrapper, cropStyle !== '' && styles.pickerSelected]}>
-            <Picker
-              selectedValue={cropStyle}
-              onValueChange={setCropStyle}
-              style={[Platform.OS === 'android' ? styles.picker : {}, cropStyle !== '' && styles.selectedPickerText]}
-            >
-              <Picker.Item label="Pumili..." value="" />
-              <Picker.Item label="Irrigated" value="irrigated" />
-              <Picker.Item label="Rainfed" value="rainfed" />
-              <Picker.Item label="Pareho" value="pareho" />
-            </Picker>
-          </View>
-        </View>
-
         {/* URI NG LUPA */}
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>🧱 Uri ng Lupa</Text>
+          <Text style={styles.cardTitle}>🧱 Klase sa Yuta</Text>
           <View style={[styles.pickerWrapper, soilType !== '' && styles.pickerSelected]}>
             <Picker
               selectedValue={soilType}
@@ -103,7 +86,7 @@ export default function SelectOptionsScreen() {
 
         {/* PANAHON */}
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>⛅ Panahon ng Pagtatanim</Text>
+          <Text style={styles.cardTitle}>⛅ Panahon sa Pagtanom</Text>
           <View style={[styles.pickerWrapper, season !== '' && styles.pickerSelected]}>
             <Picker
               selectedValue={season}

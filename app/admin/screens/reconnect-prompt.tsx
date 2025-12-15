@@ -1,171 +1,75 @@
 // app/admin/screens/reconnect-prompt.tsx
-import React, { useCallback, useEffect, useState } from 'react';
-import {
-  ActivityIndicator,
-  Image,
-  StyleSheet,
-  Text,
-  TouchableOpacity,
-  View,
-  Alert,
-} from 'react-native';
-import { useLocalSearchParams, useRouter } from 'expo-router';
-import NetInfo from '@react-native-community/netinfo';
+
+import React, { useEffect } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
+import { useRouter, useLocalSearchParams } from 'expo-router';
 import Ionicons from '@expo/vector-icons/Ionicons';
 
 import { useReadingSession } from '../../../context/ReadingSessionContext';
 
 type Params = {
-  farmerId?: string;
-  name?: string;   // from sensor-reading
   n?: string;
   p?: string;
   k?: string;
   ph?: string;
+  farmerId?: string;
+  name?: string; // passed from admin sensor-reading as farmer name
 };
 
 export default function AdminReconnectPromptScreen() {
   const router = useRouter();
+  const params = useLocalSearchParams<Params>();
   const { setFromParams } = useReadingSession();
 
-  const { farmerId, name, n, p, k, ph } = useLocalSearchParams<Params>();
-
-  const [isOnline, setIsOnline] = useState(false);
-  const [checking, setChecking] = useState(true);
-
-  const goToRecommendation = useCallback(async () => {
-    // ✅ Save to ReadingSession so recommendation.tsx always has something
-    await setFromParams({
-      n,
-      p,
-      k,
-      ph,
-      farmerId: farmerId ?? undefined,
-      farmerName: name ?? undefined,
-    });
-
-    // ⛳️ Go to admin recommendation screen with same params
-    router.replace({
-      pathname: '/admin/screens/recommendation',
-      params: {
-        farmerId: farmerId ?? '',
-        farmerName: name ?? '',
-        n: n ?? '0',
-        p: p ?? '0',
-        k: k ?? '0',
-        ph: ph ?? '0',
-      },
-    });
-  }, [router, farmerId, name, n, p, k, ph, setFromParams]);
-
-  const checkConnectionOnce = useCallback(async () => {
-    setChecking(true);
-    try {
-      const state = await NetInfo.fetch();
-      const online = !!state.isConnected && !!state.isInternetReachable;
-      setIsOnline(online);
-      if (online) {
-        // If we’re online, go right away
-        await goToRecommendation();
-      }
-    } catch (err) {
-      console.error('NetInfo error:', err);
-      Alert.alert(
-        'Network Check Failed',
-        'Hindi ma-check ang internet connection. Subukan ulit.'
-      );
-    } finally {
-      setChecking(false);
-    }
-  }, [goToRecommendation]);
-
   useEffect(() => {
-    // initial check
-    checkConnectionOnce();
-
-    const unsub = NetInfo.addEventListener((state) => {
-      const online = !!state.isConnected && !!state.isInternetReachable;
-      setIsOnline(online);
-      if (online) {
-        // fire and forget
-        goToRecommendation();
+    (async () => {
+      try {
+        await setFromParams({
+          n: params.n,
+          p: params.p,
+          k: params.k,
+          ph: params.ph,
+          farmerId: params.farmerId,
+          farmerName: params.name, // map "name" -> farmerName in session
+          ts: Date.now(),
+        });
+      } catch (e) {
+        console.warn('[AdminReconnectPrompt] failed to set reading session:', e);
       }
-    });
+    })();
+  }, [params, setFromParams]);
 
-    return () => unsub();
-  }, [checkConnectionOnce, goToRecommendation]);
+  const handleProceed = () => {
+    router.replace('/admin/screens/recommendation');
+  };
 
   return (
     <View style={styles.container}>
-      <Image
-        source={require('../../../assets/images/fertisense-logo.png')}
-        style={styles.logo}
+      <Ionicons
+        name="cloud-offline-outline"
+        size={80}
+        color="#E53935"
+        style={{ marginBottom: 20 }}
       />
-      <View style={styles.card}>
-        <Text style={styles.title}>Reconnect to Internet</Text>
-        <Text style={styles.subtitle}>
-          Step 2 of 2 – Tapos na ang pagbabasa sa ESP32-NPK.
+      <Text style={styles.title}>Internet Connection Required</Text>
+      <Text style={styles.instruction}>
+        Tapos na ang pagbasa ng sensor para sa napiling farmer.
+        <Text style={styles.bold}>
+          {' '}Kailangan mong bumalik sa normal na Wi-Fi (na may internet){' '}
         </Text>
-        <Text style={styles.body}>
-          1. Lumabas sa <Text style={styles.bold}>ESP32-NPK</Text> Wi-Fi.{'\n'}
-          2. Kumonekta sa <Text style={styles.bold}>normal Wi-Fi</Text> o{' '}
-          <Text style={styles.bold}>mobile data</Text>.{'\n'}
-          3. Kapag may internet na, automatic kang dadalhin sa fertilizer recommendation page.
-        </Text>
+        upang maipadala ang datos at makuha ang fertilizer recommendation.
+      </Text>
+      <Text style={styles.instructionNote}>
+        1. Disconnect mula sa <Text style={styles.bold}>"ESP32-NPK"</Text> Wi-Fi.
+      </Text>
+      <Text style={styles.instructionNote}>
+        2. Kumonekta sa isang <Text style={styles.bold}>Internet-Enabled</Text> Wi-Fi o mobile data.
+      </Text>
 
-        <View style={styles.statusBox}>
-          <Ionicons
-            name={isOnline ? 'cloud-done' : 'cloud-offline'}
-            size={28}
-            color={isOnline ? '#2e7d32' : '#d32f2f'}
-          />
-          <View style={{ marginLeft: 10 }}>
-            <Text style={styles.statusText}>
-              Status:{' '}
-              <Text style={styles.bold}>
-                {isOnline ? 'Online' : 'Walang internet'}
-              </Text>
-            </Text>
-            <Text style={styles.statusSub}>
-              {checking
-                ? 'Checking connection...'
-                : isOnline
-                ? 'Internet OK, loading recommendation...'
-                : 'Pakisigurong nakabalik na sa Wi-Fi / data.'}
-            </Text>
-          </View>
-        </View>
-
-        <TouchableOpacity
-          style={styles.button}
-          onPress={checkConnectionOnce}
-        >
-          {checking ? (
-            <ActivityIndicator color="#fff" />
-          ) : (
-            <>
-              <Ionicons
-                name="wifi"
-                size={20}
-                color="#fff"
-                style={{ marginRight: 8 }}
-              />
-              <Text style={styles.buttonText}>
-                I’m Connected – Check Again
-              </Text>
-            </>
-          )}
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={styles.secondaryBtn}
-          onPress={goToRecommendation}
-        >
-          <Text style={styles.secondaryText}>
-            Skip check (I know I’m online)
-          </Text>
-        </TouchableOpacity>
-      </View>
+      <TouchableOpacity style={styles.actionButton} onPress={handleProceed}>
+        <Ionicons name="cloud-upload-outline" size={22} color="#fff" />
+        <Text style={styles.actionButtonText}>I-connect at Magpatuloy</Text>
+      </TouchableOpacity>
     </View>
   );
 }
@@ -173,80 +77,49 @@ export default function AdminReconnectPromptScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#ffffff',
-    alignItems: 'center',
-    paddingTop: 40,
-    paddingHorizontal: 24,
-  },
-  logo: {
-    width: 200,
-    height: 200,
-    resizeMode: 'contain',
-    marginBottom: -10,
-  },
-  card: {
-    width: '100%',
-    backgroundColor: '#f5fbf5',
-    borderRadius: 18,
-    padding: 22,
-    elevation: 4,
-  },
-  title: {
-    fontSize: 20,
-    fontWeight: '800',
-    color: '#2e7d32',
-    marginBottom: 6,
-    textAlign: 'center',
-  },
-  subtitle: {
-    fontSize: 14,
-    color: '#555',
-    textAlign: 'center',
-    marginBottom: 16,
-  },
-  body: {
-    fontSize: 14,
-    color: '#333',
-    marginBottom: 18,
-    lineHeight: 20,
-  },
-  bold: { fontWeight: '700' },
-  statusBox: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#e8f5e9',
-    padding: 12,
-    borderRadius: 12,
-    marginBottom: 18,
-  },
-  statusText: { fontSize: 14, color: '#2e7d32' },
-  statusSub: {
-    fontSize: 12,
-    color: '#555',
-    marginTop: 2,
-  },
-  button: {
-    backgroundColor: '#2e7d32',
-    borderRadius: 40,
-    paddingVertical: 12,
-    paddingHorizontal: 18,
-    flexDirection: 'row',
     justifyContent: 'center',
     alignItems: 'center',
+    padding: 30,
+    backgroundColor: '#fff',
   },
-  buttonText: {
-    color: '#fff',
-    fontWeight: '700',
-    fontSize: 15,
-  },
-  secondaryBtn: {
-    marginTop: 10,
-    paddingVertical: 8,
-    alignItems: 'center',
-  },
-  secondaryText: {
+  title: {
+    fontSize: 22,
+    fontWeight: 'bold',
     color: '#2e7d32',
-    fontSize: 13,
+    marginBottom: 15,
+    textAlign: 'center',
+  },
+  instruction: {
+    fontSize: 16,
+    color: '#444',
+    textAlign: 'center',
+    marginBottom: 20,
+    lineHeight: 24,
+  },
+  instructionNote: {
+    fontSize: 15,
+    color: '#333',
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  bold: {
+    fontWeight: 'bold',
+  },
+  actionButton: {
+    marginTop: 40,
+    backgroundColor: '#2e7d32',
+    flexDirection: 'row',
+    paddingVertical: 14,
+    paddingHorizontal: 32,
+    borderRadius: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 5,
+  },
+  actionButtonText: {
+    color: '#fff',
+    fontSize: 16,
     fontWeight: '600',
+    marginLeft: 8,
   },
 });

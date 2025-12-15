@@ -41,21 +41,30 @@ export default function AdminTabLayout() {
           let iconName: keyof typeof Ionicons.glyphMap = 'home-outline';
 
           switch (route.name) {
-            case 'admin-home':
-              iconName = focused ? 'home' : 'home-outline';
-              break;
-            case 'logs':
-              iconName = focused ? 'grid' : 'grid-outline';
-              break;
-            case 'connect-instructions':
-              iconName = focused ? 'time' : 'time-outline';
-              break;
-            case 'admin-profile':
-              iconName = focused ? 'person' : 'person-outline';
-              break;
-            default:
-              iconName = focused ? 'home' : 'home-outline';
-          }
+              case 'admin-home':
+                iconName = focused ? 'home' : 'home-outline';
+                break;
+
+              case 'logs':
+                iconName = focused ? 'grid' : 'grid-outline';
+                break;
+
+              case 'view-stakeholders':
+                iconName = focused ? 'people' : 'people-outline';
+                break;
+
+              case 'connect-instructions':
+                iconName = focused ? 'time' : 'time-outline';
+                break;
+
+              case 'admin-profile':
+                iconName = focused ? 'person' : 'person-outline';
+                break;
+
+              default:
+                iconName = focused ? 'home' : 'home-outline';
+            }
+
 
           return (
             <View style={styles.iconWrapper}>
@@ -81,14 +90,21 @@ export default function AdminTabLayout() {
       <Tabs.Screen name="logs" />
       <Tabs.Screen name="connect-instructions" />
       <Tabs.Screen name="admin-profile" />
+  
 
       {/* Hidden routes */}
       <Tabs.Screen name="farmers" options={{ href: null }} />
       <Tabs.Screen name="prices" options={{ href: null }} />
       <Tabs.Screen name="add-farmer" options={{ href: null }} />
       <Tabs.Screen name="edit-price" options={{ href: null }} />
+      <Tabs.Screen name="view-stakeholders" options={{ href: null }} />
+
     </Tabs>
+
+      
+
   );
+  
 }
 
 const styles = StyleSheet.create({

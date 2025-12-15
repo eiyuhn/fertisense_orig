@@ -13,16 +13,14 @@ import {
   Text,
   TouchableOpacity,
   View,
-  Alert,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth } from '../../../context/AuthContext';
-import { useNavigation, useFocusEffect } from '@react-navigation/native';
+import { useFocusEffect } from '@react-navigation/native';
 import { BASE_URL } from '../../../src/api';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 const sensorImg = require('../../../assets/images/connect-sensor.png');
-const farmerImg = require('../../../assets/images/farmer-data.png');
-const priceImg = require('../../../assets/images/ferti-price.png');
 
 const getFormattedDate = () => {
   const options = {
@@ -44,61 +42,25 @@ type StakeholderReading = {
 
 export default function StakeholderHome() {
   const router = useRouter();
-  const navigation = useNavigation();
-  const { user, logout } = useAuth();
+  const { user } = useAuth();
+  const insets = useSafeAreaInsets();
 
-  // Use backend field `photoUrl` and cache-bust when it changes
   const [profileImageUrl, setProfileImageUrl] = useState<string | null>(
     (user as any)?.photoUrl || null
   );
   const [imgKey, setImgKey] = useState<number>(Date.now());
 
-  // ❗New: keep the stakeholder's own last reading (from AsyncStorage)
-  const [lastReading, setLastReading] = useState<StakeholderReading | null>(null);
+  const [lastReading, setLastReading] = useState<StakeholderReading | null>(
+    null
+  );
 
-  // Keep profile + logout behavior
+  // Refresh profile + last reading whenever this tab is focused
   useFocusEffect(
     useCallback(() => {
       const url = (user as any)?.photoUrl || null;
       setProfileImageUrl(url);
       setImgKey(Date.now());
 
-      // ✅ Only intercept hardware back (GO_BACK). Allow tab switches & pushes.
-      const unsubscribe = (navigation as any).addListener(
-        'beforeRemove',
-        (e: any) => {
-          if (e?.data?.action?.type !== 'GO_BACK') return; // let other actions proceed
-          if (!(navigation as any).isFocused()) return;
-
-          e.preventDefault();
-
-          Alert.alert(
-            'Confirm Logout',
-            'You must log out to leave the application. Do you want to log out now?',
-            [
-              { text: 'Cancel', style: 'cancel' },
-              {
-                text: 'Logout',
-                style: 'destructive',
-                onPress: async () => {
-                  await logout();
-                  router.replace('/login');
-                },
-              },
-            ]
-          );
-        }
-      );
-
-      return () => {
-        unsubscribe();
-      };
-    }, [user, navigation, logout, router])
-  );
-
-  // ❗New: on focus, load stakeholder's own last reading from AsyncStorage
-  useFocusEffect(
-    useCallback(() => {
       let isActive = true;
 
       const loadLastReading = async () => {
@@ -131,7 +93,6 @@ export default function StakeholderHome() {
     }, [user?._id])
   );
 
-  // Build absolute URL with cache-busting
   const buildPhotoUrl = (u?: string | null) => {
     if (!u) return null;
     const raw = u.startsWith('http') ? u : `${BASE_URL}${u}`;
@@ -140,100 +101,114 @@ export default function StakeholderHome() {
   const fullPhotoUrl = buildPhotoUrl(profileImageUrl);
 
   return (
-    <ScrollView contentContainerStyle={styles.container}>
-      {/* HEADER */}
-      <View style={styles.headerSection}>
-        <View style={styles.headerTop}>
-          <View style={styles.welcomeTextContainer}>
-            <Text style={styles.headerText}>Welcome,</Text>
-            <Text style={styles.boldHeaderText}>{user?.name || 'Stakeholder'}!</Text>
-            <Text style={styles.dateText}>{getFormattedDate()}</Text>
+    <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={[
+          styles.scrollContent,
+          {
+            paddingBottom: insets.bottom + 120, // 👈 enough space for tab bar + last card
+          },
+        ]}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
+        {/* HEADER */}
+        <View style={styles.headerSection}>
+          <View style={styles.headerTop}>
+            <View style={styles.welcomeTextContainer}>
+              <Text style={styles.headerText}>Welcome,</Text>
+              <Text style={styles.boldHeaderText}>
+                {user?.name || 'Stakeholder'}!
+              </Text>
+              <Text style={styles.dateText}>{getFormattedDate()}</Text>
+            </View>
+
+            {/* Profile avatar → Profile screen */}
+            <TouchableOpacity
+              style={styles.profileContainer}
+              onPress={() =>
+                router.push('/(stakeholder)/tabs/stakeholder-profile')
+              }
+              accessibilityRole="button"
+              accessibilityLabel="Open profile"
+            >
+              {fullPhotoUrl ? (
+                <Image
+                  key={imgKey}
+                  source={{ uri: fullPhotoUrl }}
+                  style={styles.profileImage}
+                />
+              ) : (
+                <View style={styles.defaultAvatarStyle}>
+                  <Ionicons name="person" size={30} color="#fff" />
+                </View>
+              )}
+            </TouchableOpacity>
           </View>
-
-          {/* Profile avatar → Profile screen */}
-          <TouchableOpacity
-            style={styles.profileContainer}
-            onPress={() => router.push('/(stakeholder)/tabs/stakeholder-profile')}
-            accessibilityRole="button"
-            accessibilityLabel="Open profile"
-          >
-            {fullPhotoUrl ? (
-              <Image
-                key={imgKey}
-                source={{ uri: fullPhotoUrl }}
-                style={styles.profileImage}
-                onError={() => {
-                  // fallback to default avatar
-                }}
-              />
-            ) : (
-              <View style={styles.defaultAvatarStyle}>
-                <Ionicons name="person" size={30} color="#fff" />
-              </View>
-            )}
-          </TouchableOpacity>
         </View>
-      </View>
 
-      <View style={styles.cardWrapper}>
-        <SectionLabel text="📌 Available Actions" />
-        <ActionCard
-          color="#e6f4ea"
-          icon={<Image source={sensorImg} style={styles.sensorImage} />}
-          title="Connect to Sensor"
-          subtitle="Measure NPK Soil"
-          onPress={() => router.push('/(stakeholder)/tabs/connect-instructions')}
-          iconColor="#2e7d32"
-        />
-
-        {/* ⭐ Farm Insights now uses ONLY this stakeholder's own last reading */}
-        <SectionLabel text="📊 Farm Insights" />
-        {lastReading ? (
-          <InfoCard
-            color="#fce4ec"
-            imageUri="https://cdn-icons-png.flaticon.com/512/2906/2906278.png"
-            title={`Latest Reading: ${new Date(
-              lastReading.timestamp
-            ).toLocaleString('en-PH')}`}
-            subtitle={`N: ${lastReading.n} | P: ${lastReading.p} | K: ${lastReading.k}${
-              lastReading.ph !== undefined && lastReading.ph !== null
-                ? ` | pH: ${lastReading.ph}`
-                : ''
-            }`}
-          />
-        ) : (
-          <InfoCard
-            color="#fce4ec"
-            imageUri="https://cdn-icons-png.flaticon.com/512/2906/2906278.png"
-            title="No sensor data yet"
-            subtitle="Once you connect your sensor and get readings, insights will appear here."
-            buttonLabel="📡 Connect Sensor"
-            onButtonPress={() =>
+        {/* BODY */}
+        <View style={styles.cardWrapper}>
+          <SectionLabel text="📌 Available Actions" />
+          <ActionCard
+            color="#e6f4ea"
+            icon={<Image source={sensorImg} style={styles.sensorImage} />}
+            title="Connect to Sensor"
+            subtitle="Measure NPK Soil"
+            onPress={() =>
               router.push('/(stakeholder)/tabs/connect-instructions')
             }
+            iconColor="#2e7d32"
           />
-        )}
 
-        <SectionLabel text="🌱 Soil Health Tips" />
-        <InfoCard
-          color="#fffde7"
-          title="✅ Tip: Test soil monthly to optimize fertilizer use."
-          subtitle="Avoid compacting wet soil with machinery to protect structure."
-        />
+          <SectionLabel text="📊 Farm Insights" />
+          {lastReading ? (
+            <InfoCard
+              color="#fce4ec"
+              imageUri="https://cdn-icons-png.flaticon.com/512/2906/2906278.png"
+              title={`Latest Reading: ${new Date(
+                lastReading.timestamp
+              ).toLocaleString('en-PH')}`}
+              subtitle={`N: ${lastReading.n} | P: ${lastReading.p} | K: ${
+                lastReading.k
+              }${
+                lastReading.ph !== undefined && lastReading.ph !== null
+                  ? ` | pH: ${lastReading.ph}`
+                  : ''
+              }`}
+            />
+          ) : (
+            <InfoCard
+              color="#fce4ec"
+              imageUri="https://cdn-icons-png.flaticon.com/512/2906/2906278.png"
+              title="No sensor data yet"
+              subtitle="Once you connect your sensor and get readings, insights will appear here."
+              buttonLabel="📡 Connect Sensor"
+              onButtonPress={() =>
+                router.push('/(stakeholder)/tabs/connect-instructions')
+              }
+            />
+          )}
 
-        <SectionLabel text="❓ Help & Support" />
-        <ActionCard
-          color="#e3f2fd"
-          icon={<Ionicons name="help-circle-outline" size={40} color="#1565c0" />}
-          title="Need Help?"
-          subtitle="View FAQs or contact support."
-          onPress={() => router.push('/(stakeholder)/screens/support')}
-          iconColor="#1565c0"
-        />
-
-        <View style={{ height: 50 }} />
-      </View>
-    </ScrollView>
+          <SectionLabel text="❓ Help & Support" />
+          <ActionCard
+            color="#e3f2fd"
+            icon={
+              <Ionicons
+                name="help-circle-outline"
+                size={40}
+                color="#1565c0"
+              />
+            }
+            title="Need Help?"
+            subtitle="View FAQs or contact support."
+            onPress={() => router.push('/(stakeholder)/screens/support')}
+            iconColor="#1565c0"
+          />
+        </View>
+      </ScrollView>
+    </SafeAreaView>
   );
 }
 
@@ -258,7 +233,10 @@ const ActionCard = ({
   onPress: () => void;
   iconColor: string;
 }) => (
-  <TouchableOpacity style={[styles.card, { backgroundColor: color }]} onPress={onPress}>
+  <TouchableOpacity
+    style={[styles.card, { backgroundColor: color }]}
+    onPress={onPress}
+  >
     <View style={styles.iconWrapper}>{icon}</View>
     <View style={styles.cardContent}>
       <Text style={[styles.cardTitle, { color: iconColor }]}>{title}</Text>
@@ -297,14 +275,21 @@ const InfoCard = ({
 );
 
 const styles = StyleSheet.create({
-  container: {
-    flexGrow: 1,
+  safe: {
+    flex: 1,
     backgroundColor: '#fff',
-    paddingBottom: 10,
   },
+  scroll: {
+    flex: 1,
+  },
+  scrollContent: {
+    flexGrow: 1, // 👈 allows scrolling when content is taller than screen
+    backgroundColor: '#fff',
+  },
+
   headerSection: {
     backgroundColor: '#0d5213',
-    paddingTop: 60,
+    paddingTop: 40,
     paddingBottom: 25,
     paddingHorizontal: 23,
     borderBottomRightRadius: 100,
@@ -356,10 +341,11 @@ const styles = StyleSheet.create({
     borderWidth: 3,
     borderColor: '#fff',
   },
+
   cardWrapper: {
     paddingHorizontal: 20,
     paddingTop: 25,
-    paddingBottom: 60,
+    paddingBottom: 24,
   },
   sectionLabel: {
     fontSize: 18,
@@ -408,6 +394,7 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontFamily: 'Poppins_400Regular',
   },
+
   infoBox: {
     padding: 20,
     borderRadius: 18,

@@ -68,15 +68,15 @@ export default function ConnectInstructionsScreen() {
         {/* Instruction card */}
         <View style={styles.card}>
           <Text style={styles.lead}>
-            Bago makita ang datos, ikonekta muna ang device sa iyong cellphone.
+            Ayha makita ang datos, ikonekta una ang device sa imong cellphone.
           </Text>
 
           {/* Step list */}
-          <InstructionRow icon="power" text="I-on ang iyong sensor device." />
-          <InstructionRow icon="wifi" text="Buksan ang Wi-Fi / Location ng iyong cellphone." />
-          <InstructionRow icon="swap-horizontal" text="Pindutin ang ‘Connect’ upang hanapin ang device." />
-          <InstructionRow icon="leaf" text="Ilagay ang sensor sa lupa para sa susunod na hakbang." />
-          <InstructionRow icon="checkmark-circle" text="Hintaying kumonekta o makita ang ‘Successful’ na status." />
+          <InstructionRow icon="power" text="I-on ang imong sensor device." />
+          <InstructionRow icon="wifi" text="I-on ang Wi-Fi ug pangitaa ang ESP32-NPK." /> “ESP32-NPK” 
+          <InstructionRow icon="swap-horizontal" text="Pinduta ang ‘Connect’ aron makakonek sa sensor." />
+          <InstructionRow icon="leaf" text="Pilia kung unsang klase sa humay ang imong itanom." />
+          <InstructionRow icon="checkmark-circle" text="Hulata nga makakonek ug makita ang ‘Successful’ nga status." />
 
           {/* Connect button */}
           <TouchableOpacity
@@ -149,7 +149,7 @@ const styles = StyleSheet.create({
     elevation: 2,
   },
 
-  logo: { width: 200, height: 78, marginBottom: 10, marginTop: -40 },
+  logo: { width: 120, height: 78, marginBottom: 10, marginTop: -40 },
   title: { fontSize: 20, fontWeight: '700', color: GREEN, marginBottom: 16 },
 
   card: {
@@ -168,6 +168,15 @@ const styles = StyleSheet.create({
     marginBottom: 14,
     textAlign: 'center',
   },
+
+  stepText: {
+    flex: 1,
+    fontSize: 15,
+    color: '#434343',
+    lineHeight: 21,
+  },
+
+  bold: { fontWeight: '800' },
 
   cta: {
     marginTop: 10,

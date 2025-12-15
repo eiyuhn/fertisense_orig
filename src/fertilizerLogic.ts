@@ -1,5 +1,6 @@
 // src/fertilizerLogic.ts
 import { AdminPricesDoc, RecommendPlan, RecommendPlanRow, RecommendResponse } from './services';
+import { classifyNutrient } from '../constants/npkThresholds';
 
 /* ---------------- Types ---------------- */
 
@@ -10,7 +11,7 @@ export type SoilClass = 'light' | 'medHeavy';
 export type Season = 'wet' | 'dry';
 
 export type RiceRecommendInput = {
-  nPpm: number;
+  nPpm: number;   // For N: this is actually the sensor's N index / %OM-based value
   pPpm: number;
   kPpm: number;
   ph?: number | null;
@@ -21,24 +22,26 @@ export type RiceRecommendInput = {
   pricesDoc: AdminPricesDoc;
 };
 
-/* ---------------- 1. Classification (ppm → L/M/H) ---------------- */
+/* ---------------- 1. Classification (sensor → L/M/H) ---------------- */
 
-export function classifyN(nPpm: number): NutrientRating {
-  if (nPpm < 100) return 'L';
-  if (nPpm <= 150) return 'M';
-  return 'H';
+// N: use the new OM-based thresholds from npkThresholds.ts
+export function classifyN(nValue: number): NutrientRating {
+  const res = classifyNutrient('N', nValue);
+  return res ? res.code : 'M'; // default to Medium if something is off
 }
 
+// P: still using your original DA-style thresholds
+// (you can switch this to classifyNutrient('P', ...) once you fill P ranges)
 export function classifyP(pPpm: number): NutrientRating {
   if (pPpm < 15) return 'L';
   if (pPpm <= 30) return 'M';
   return 'H';
 }
 
+// K: use the new 0–117 / >117–235 / >235 ppm thresholds
 export function classifyK(kPpm: number): NutrientRating {
-  if (kPpm < 80) return 'L';
-  if (kPpm <= 150) return 'M';
-  return 'H';
+  const res = classifyNutrient('K', kPpm);
+  return res ? res.code : 'M';
 }
 
 /* ---------------- 2. Target kg/ha table (from your booklet) ---------------- */
@@ -281,6 +284,8 @@ export function computeBalancedPlan(
   };
 }
 
+
+
 /* ---------------- 5. High-level function: from soil ppm → RecommendResponse ---------------- */
 
 export function buildRiceRecommendation(input: RiceRecommendInput): RecommendResponse {
@@ -371,5 +376,54 @@ export function buildRiceRecommendation(input: RiceRecommendInput): RecommendRes
     plans: [plan],
     cheapest: { code: plan.code, total: plan.total, currency },
     updatedAt: new Date().toISOString(),
+  };
+  
+}
+
+// ================================
+// ✅ Simple wrapper used by the app screens
+// (Guest/Stakeholder can both call this)
+// ================================
+export function generateFertilizerPlan(args: {
+  n: number;
+  p: number;
+  k: number;
+  ph?: number | null;
+
+  areaHa?: number;
+  variety?: RiceVariety;
+  soilClass?: SoilClass;
+  season?: Season;
+
+  pricesDoc: AdminPricesDoc;
+}) {
+  const resp = buildRiceRecommendation({
+    nPpm: args.n,
+    pPpm: args.p,
+    kPpm: args.k,
+    ph: args.ph ?? undefined,
+    areaHa: args.areaHa ?? 1,
+    variety: args.variety ?? 'hybrid',
+    soilClass: args.soilClass ?? 'medHeavy',
+    season: args.season ?? 'wet',
+    pricesDoc: args.pricesDoc,
+  });
+
+  // Convert RecommendResponse -> UI-friendly plans
+  const fertilizerPlans = (resp.plans || []).map((p) => ({
+    name: p.title,
+    cost: String(Math.round((p.total ?? 0) * 100) / 100),
+    details: (p.rows || []).map((r) => {
+      const bags = Math.round((r.bags ?? 0) * 100) / 100;
+      const subtotal = Math.round((r.subtotal ?? 0) * 100) / 100;
+      return `${bags} bag(s) - ${r.label} | ${resp.cheapest?.currency ?? 'PHP'} ${r.pricePerBag}/bag | Subtotal: ${resp.cheapest?.currency ?? 'PHP'} ${subtotal}`;
+    }),
+  }));
+
+  return {
+    recommendationText: resp.narrative?.tl ?? '',
+    englishText: resp.narrative?.en ?? '',
+    fertilizerPlans,
+    raw: resp, // optional if you want to use ratings/targets later
   };
 }
