@@ -76,25 +76,6 @@ export default function GuestHome() {
           </TouchableOpacity>
         </Animated.View>
 
-        {/* FERTILIZER GUIDES */}
-        <Text style={styles.sectionLabel}>📖 Fertilizer Guides</Text>
-        <Animated.View entering={FadeInUp.delay(700).springify()}>
-          <TouchableOpacity
-            style={[styles.card, { backgroundColor: '#fff3e0' }]}
-            onPress={() => router.push('/guest/screens/fertilizer-guides')}
-          >
-            <View style={styles.iconWrapper}>
-              <Ionicons name="book-outline" size={40} color="#ef6c00" />
-            </View>
-            <View style={styles.cardContent}>
-              <Text style={[styles.cardTitle, { color: '#e65100' }]}>Fertilizer Guides</Text>
-              <Text style={styles.cardSubtitle}>
-                Learn how to avoid overfertilization and apply just the right amount.
-              </Text>
-            </View>
-            <Ionicons name="chevron-forward" size={22} color="#e65100" />
-          </TouchableOpacity>
-        </Animated.View>
 
         {/* HELP & SUPPORT */}
         <Text style={styles.sectionLabel}>❓ Help & Support</Text>

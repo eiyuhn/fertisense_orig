@@ -132,10 +132,11 @@ export default function AdminConnectInstructionsScreen() {
             Ayha makita ang datos, ikonekta una ang device sa imong cellphone.
           </Text>
 
-          <InstructionRow icon="power" text="I-on ang imong sensor device." />
-          <InstructionRow icon="wifi" text={`I-on ang Wi-Fi ug pangitaa ang "${ESP_SSID}".`} />
-          <InstructionRow icon="swap-horizontal" text="Pinduta ang ‘Connect’ aron makakonek sa sensor." />
-          <InstructionRow icon="leaf" text="Pilia ang options sa humay (hybrid/inbred, yuta, season)." />
+          <InstructionRow icon="power" text="Turn on your sensor device." />
+          <InstructionRow icon="wifi" text={`Turn on Wi-Fi and look for "${ESP_SSID}".`} />
+          <InstructionRow icon="swap-horizontal" text="Tap ‘Connect’ to connect to the sensor." />
+          <InstructionRow icon="leaf" text="Choose the rice field options (hybrid/inbred, soil type, season)." />
+
 
           <TouchableOpacity
             style={[styles.cta, (busy || !hasSelectedFarmer) && styles.ctaDisabled]}

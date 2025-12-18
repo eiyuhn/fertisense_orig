@@ -111,7 +111,7 @@ export default function SelectOptionsScreen() {
 
       <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
         <Text style={styles.description}>
-          Pumili ng mga impormasyon tungkol sa iyong sakahan upang makabuo ng tamang rekomendasyon.
+          Pagpili og impormasyon bahin sa imong umahan aron makabuhat og tama nga rekomendasyon.
         </Text>
 
         <View style={styles.card}>

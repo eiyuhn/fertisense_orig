@@ -14,6 +14,7 @@ import {
   View,
   Platform,
   StatusBar,
+  ScrollView,
 } from 'react-native';
 
 import {
@@ -420,7 +421,6 @@ async function callApi<T = any>(fn: any, args: any[]): Promise<T> {
   try {
     return await fn(...args);
   } catch (e) {
-    // try again without token if the signature differs
     if (args.length >= 1) {
       try {
         return await fn(...args.filter((x) => x !== undefined && x !== null));
@@ -430,6 +430,169 @@ async function callApi<T = any>(fn: any, args: any[]): Promise<T> {
     }
     throw e;
   }
+}
+
+/* =========================================================
+   ✅ Stakeholder-style horizontal table UI helpers
+   ========================================================= */
+const STAGE_COL_W = 190;
+const COL_W = 130;
+
+const FERTILIZER_NAMES: Record<string, string> = {
+  '46-0-0': 'Urea',
+  '21-0-0': 'Ammosul',
+  '0-0-60': 'Muriate of Potash (MOP)',
+  '18-46-0': 'Diammonium Phosphate (DAP)',
+  '16-20-0': 'Ammophos',
+  '14-14-14': 'Complete Fertilizer',
+  'Organic Fertilizer': 'Organic Fertilizer',
+};
+
+function ScrollProgress({ progress01 }: { progress01: number }) {
+  const p = Math.max(0, Math.min(1, Number(progress01 || 0)));
+  return (
+    <View style={styles.progressTrack}>
+      <View style={[styles.progressThumb, { width: `${Math.max(15, p * 100)}%` }]} />
+    </View>
+  );
+}
+
+function PlanTableCardAdmin({
+  plan,
+  idx,
+  currencyFallback,
+  readingId,
+}: {
+  plan: FertilizerPlan;
+  idx: number;
+  currencyFallback?: string | null;
+  readingId: string;
+}) {
+  const { fertCodes, stages, totals, hasAny, rawDetails, hasRaw } = buildTableFromPlanDetails(plan);
+
+  const optionLabel = `Fertilization Recommendation Option ${idx + 1}`;
+  const contentWidth = STAGE_COL_W + fertCodes.length * COL_W;
+
+  const [progress01, setProgress01] = React.useState(0);
+
+  const safeCost = String(plan?.cost || '').trim();
+  const safeTitle = String(plan?.name || `Plan ${idx + 1}`).trim();
+
+  if (!hasAny) {
+    return (
+      <View style={styles.planBoxNew}>
+        <View style={styles.planTopLine}>
+          <Text style={styles.planTitleNew}>{safeTitle}</Text>
+          <Text style={styles.planCostNew}>{safeCost}</Text>
+        </View>
+
+        <Text style={styles.detailsText}>Could not build a table from this plan (format not recognized).</Text>
+
+        {hasRaw ? (
+          <View style={{ marginTop: 6 }}>
+            <Text style={[styles.detailsText, { fontWeight: '700' }]}>Raw details:</Text>
+            {rawDetails.slice(0, 30).map((d, i) => (
+              <Text key={`${readingId}-${idx}-raw-${i}`} style={[styles.detailsText, { marginBottom: 2 }]}>
+                • {d}
+              </Text>
+            ))}
+            {rawDetails.length > 30 ? <Text style={styles.recHint}>Showing first 30 lines only.</Text> : null}
+          </View>
+        ) : (
+          <Text style={styles.recHint}>No details found in this plan.</Text>
+        )}
+      </View>
+    );
+  }
+
+  const stageBags = (map: Record<string, number>, code: string) => Number(map?.[code] || 0);
+
+  const rowStage = (label: string, map: Record<string, number>) => (
+    <View style={styles.tableRow}>
+      <View style={styles.stageCell}>
+        <Text style={styles.stageText}>{label}</Text>
+      </View>
+      {fertCodes.map((code) => (
+        <View key={`${readingId}-${idx}-${label}-${code}`} style={styles.fertCell}>
+          <Text style={styles.bagsText} numberOfLines={1}>
+            {bagsFmt(stageBags(map, code))}
+          </Text>
+        </View>
+      ))}
+    </View>
+  );
+
+  return (
+    <View style={styles.table}>
+      <View style={styles.tableHeader}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.tableTitle}>{optionLabel}</Text>
+          <Text style={[styles.detailsText, { marginTop: 2 }]} numberOfLines={1}>
+            {safeTitle}
+          </Text>
+        </View>
+
+        <View style={{ alignItems: 'flex-end' }}>
+          <Text style={styles.priceTag} numberOfLines={1}>
+            {safeCost || `${currencyFallback || 'PHP'} 0.00`}
+          </Text>
+        </View>
+      </View>
+
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        nestedScrollEnabled
+        directionalLockEnabled
+        onScroll={(e) => {
+          const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+          const max = Math.max(1, contentSize.width - layoutMeasurement.width);
+          const pr = Math.max(0, Math.min(1, contentOffset.x / max));
+          setProgress01(pr);
+        }}
+        scrollEventThrottle={16}
+      >
+        <View style={{ minWidth: contentWidth }}>
+          <View style={[styles.tableRow, styles.headerRow]}>
+            <View style={[styles.stageCell, styles.stageHeaderCell]}>
+              <Text style={styles.stageHeaderText}>Stages</Text>
+            </View>
+
+            {fertCodes.map((code) => (
+              <View key={`${readingId}-${idx}-hdr-${code}`} style={styles.fertHeaderCell}>
+                <Text style={styles.headerCodeText} numberOfLines={1}>
+                  {code}
+                </Text>
+                <Text style={styles.headerNameText} numberOfLines={2}>
+                  {FERTILIZER_NAMES[code] || 'Fertilizer'}
+                </Text>
+              </View>
+            ))}
+          </View>
+
+          {rowStage('Organic', stages.ORGANIC)}
+          {rowStage('At Planting', stages.BASAL)}
+          {rowStage('After 30 Days', stages.AFTER30)}
+          {rowStage('Top Dress', stages.TOPDRESS)}
+
+          <View style={[styles.tableRow, styles.tableFooter]}>
+            <View style={[styles.stageCell, styles.stageFooterCell]}>
+              <Text style={styles.totalStageText}>Total Bags</Text>
+            </View>
+            {fertCodes.map((code) => (
+              <View key={`${readingId}-${idx}-tot-${code}`} style={[styles.fertCell, styles.footerFertCell]}>
+                <Text style={styles.totalBagsText} numberOfLines={1}>
+                  {bagsFmt(Number(totals?.[code] || 0))}
+                </Text>
+              </View>
+            ))}
+          </View>
+        </View>
+      </ScrollView>
+
+      {fertCodes.length >= 3 ? <ScrollProgress progress01={progress01} /> : null}
+    </View>
+  );
 }
 
 export default function LogsScreen() {
@@ -562,10 +725,11 @@ export default function LogsScreen() {
       const k = toNum(pickReadingK(r));
       const ph = toNum(pickReadingPh(r));
 
-      const ts =
-        r?.createdAt ? new Date(r.createdAt).getTime() :
-        r?.updatedAt ? new Date(r.updatedAt).getTime() :
-        Date.now();
+      const ts = r?.createdAt
+        ? new Date(r.createdAt).getTime()
+        : r?.updatedAt
+        ? new Date(r.updatedAt).getTime()
+        : Date.now();
 
       if (!n && !p && !k) {
         Alert.alert('No Reading', 'This reading has no valid NPK values.');
@@ -654,7 +818,6 @@ export default function LogsScreen() {
           }
 
           try {
-            // try both possible signatures: (farmerId, readingId, token) OR (readingId, token)
             try {
               await callApi(deleteReadingApi as any, [fid, rid, token]);
             } catch {
@@ -730,22 +893,7 @@ export default function LogsScreen() {
     if (!plans.length) plans = buildPseudoPlansFromDaSchedule(reading);
     if (!plans.length) return <Text style={styles.noRecText}>No recommendation saved.</Text>;
 
-    const row = (
-      boxKey: string,
-      label: string,
-      fertCodes: string[],
-      map: Record<string, number>,
-      isHeader = false
-    ) => (
-      <View style={[styles.planRow, isHeader && styles.planHeaderRow]}>
-        <Text style={[styles.planCellStage, isHeader && styles.planHeaderText]}>{label}</Text>
-        {fertCodes.map((code) => (
-          <Text key={`${boxKey}-${label}-${code}`} style={[styles.planCell, isHeader && styles.planHeaderText]}>
-            {isHeader ? code : bagsFmt(map[code] || 0)}
-          </Text>
-        ))}
-      </View>
-    );
+    const rid = getReadingId(reading) || 'rid';
 
     return (
       <View style={styles.recWrap}>
@@ -761,44 +909,15 @@ export default function LogsScreen() {
         {open && (
           <View style={styles.recBody}>
             {plans.slice(0, 3).map((p, i) => {
-              const { fertCodes, stages, totals, hasAny, rawDetails, hasRaw } = buildTableFromPlanDetails(p);
-              const boxKey = `${getReadingId(reading) || 'rid'}-${i}-${p?.name || 'plan'}`;
-
+              const boxKey = `${rid}-${i}-${p?.name || 'plan'}`;
               return (
-                <View key={boxKey} style={styles.planBoxNew}>
-                  <View style={styles.planTopLine}>
-                    <Text style={styles.planTitleNew}>{p?.name || `Plan ${i + 1}`}</Text>
-                    <Text style={styles.planCostNew}>{p?.cost || ''}</Text>
-                  </View>
-
-                  {!hasAny ? (
-                    <View>
-                      <Text style={styles.detailsText}>Could not build a table from this plan (format not recognized).</Text>
-
-                      {hasRaw ? (
-                        <View style={{ marginTop: 6 }}>
-                          <Text style={[styles.detailsText, { fontWeight: '700' }]}>Raw details:</Text>
-                          {rawDetails.slice(0, 30).map((d, idx) => (
-                            <Text key={`${boxKey}-raw-${idx}`} style={[styles.detailsText, { marginBottom: 2 }]}>
-                              • {d}
-                            </Text>
-                          ))}
-                          {rawDetails.length > 30 ? <Text style={styles.recHint}>Showing first 30 lines only.</Text> : null}
-                        </View>
-                      ) : (
-                        <Text style={styles.recHint}>No details found in this plan.</Text>
-                      )}
-                    </View>
-                  ) : (
-                    <>
-                      {row(boxKey, 'Stage', fertCodes, {}, true)}
-                      {row(boxKey, 'Organic', fertCodes, stages.ORGANIC)}
-                      {row(boxKey, 'At Planting', fertCodes, stages.BASAL)}
-                      {row(boxKey, 'After 30 Days', fertCodes, stages.AFTER30)}
-                      {row(boxKey, 'Top Dress', fertCodes, stages.TOPDRESS)}
-                      {row(boxKey, 'Total Bags', fertCodes, totals)}
-                    </>
-                  )}
+                <View key={boxKey} style={{ marginBottom: 10 }}>
+                  <PlanTableCardAdmin
+                    plan={p}
+                    idx={i}
+                    currencyFallback={(reading as any)?.currency || 'PHP'}
+                    readingId={rid}
+                  />
                 </View>
               );
             })}
@@ -906,9 +1025,7 @@ export default function LogsScreen() {
               onToggle={() => toggleLatestRec(fid)}
             />
 
-            <Text style={[styles.expRow, { marginTop: 8, fontWeight: '700' }]}>
-              Total readings: {totalCount}
-            </Text>
+            <Text style={[styles.expRow, { marginTop: 8, fontWeight: '700' }]}>Total readings: {totalCount}</Text>
 
             <View style={styles.allBox}>
               <Text style={styles.allTitle}>All readings (latest first)</Text>
@@ -937,9 +1054,7 @@ export default function LogsScreen() {
                         </TouchableOpacity>
                       </View>
 
-                      <Text style={styles.allDate}>
-                        🗓 {rr.createdAt ? new Date(rr.createdAt).toLocaleDateString() : '—'}
-                      </Text>
+                      <Text style={styles.allDate}>🗓 {rr.createdAt ? new Date(rr.createdAt).toLocaleDateString() : '—'}</Text>
 
                       <Text style={styles.allLine}>
                         N: {lmhN(pickReadingN(rr))} | P: {lmhP(pickReadingP(rr))} | K: {lmhK(pickReadingK(rr))}
@@ -999,10 +1114,7 @@ export default function LogsScreen() {
         contentContainerStyle={{
           padding: 16,
           paddingBottom: 110,
-          paddingTop:
-            Platform.OS === 'android'
-              ? Math.max(0, (StatusBar.currentHeight || 0) - 8)
-              : 0,
+          paddingTop: Platform.OS === 'android' ? Math.max(0, (StatusBar.currentHeight || 0) - 8) : 0,
         }}
       />
     </View>
@@ -1157,25 +1269,6 @@ const styles = StyleSheet.create({
   planTitleNew: { fontWeight: '700', fontSize: 13, color: '#1b5e20', flex: 1 },
   planCostNew: { fontWeight: '700', fontSize: 13, color: '#1b5e20' },
 
-  planRow: { flexDirection: 'row', borderTopWidth: 1, borderTopColor: '#dfeee2' },
-  planHeaderRow: { backgroundColor: '#e8f5e9' },
-  planCellStage: {
-    flex: 2,
-    paddingVertical: 8,
-    paddingHorizontal: 8,
-    fontSize: 12,
-    color: '#2f3b30',
-  },
-  planCell: {
-    flex: 1,
-    paddingVertical: 8,
-    paddingHorizontal: 6,
-    fontSize: 11,
-    textAlign: 'center',
-    color: '#2f3b30',
-  },
-  planHeaderText: { fontWeight: '700', color: '#1b5e20' },
-
   detailsText: { fontSize: 13, color: '#444', marginBottom: 3 },
   recHint: { fontSize: 11, color: TEXT_MUTED, fontStyle: 'italic', marginTop: 6 },
   noRecText: { marginTop: 8, fontSize: 12, color: TEXT_MUTED, fontStyle: 'italic' },
@@ -1203,4 +1296,68 @@ const styles = StyleSheet.create({
   deleteLatestBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 8, paddingVertical: 8 },
   deleteLatestText: { color: '#d32f2f', fontWeight: '600' },
   noReadingText: { fontSize: 12, color: TEXT_MUTED, fontStyle: 'italic', marginTop: 2 },
+
+  // ✅ Stakeholder-style horizontal plan table (prevents cut text)
+  table: { marginTop: 8, borderWidth: 1, borderColor: '#ccc', borderRadius: 10, overflow: 'hidden' },
+  tableHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    backgroundColor: '#f0f0f0',
+    padding: 10,
+    gap: 10,
+  },
+  tableTitle: { fontSize: 14, fontWeight: 'bold' },
+
+  priceTag: {
+    backgroundColor: '#5D9239',
+    color: '#fff',
+    fontWeight: 'bold',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 10,
+    fontSize: 13,
+    alignSelf: 'flex-start',
+  },
+
+  tableRow: { flexDirection: 'row', borderTopWidth: 1, borderColor: '#ddd' },
+  headerRow: { backgroundColor: '#e8f5e9' },
+
+  stageCell: { width: STAGE_COL_W, padding: 10, justifyContent: 'center' },
+  stageHeaderCell: { backgroundColor: '#e8f5e9' },
+  stageFooterCell: { backgroundColor: '#d1f7d6' },
+
+  fertHeaderCell: {
+    width: COL_W,
+    paddingVertical: 10,
+    paddingHorizontal: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#e8f5e9',
+  },
+  fertCell: { width: COL_W, padding: 10, alignItems: 'center', justifyContent: 'center' },
+
+  stageHeaderText: { fontSize: 12, fontWeight: 'bold', color: '#1b5e20', textAlign: 'left' },
+  stageText: { fontSize: 12, color: '#222', textAlign: 'left' },
+
+  headerCodeText: { fontSize: 12, fontWeight: '800', color: '#1b5e20', textAlign: 'center' },
+  headerNameText: { marginTop: 2, fontSize: 10, color: '#2f3b30', textAlign: 'center', lineHeight: 13 },
+
+  bagsText: { fontSize: 12, color: '#222', textAlign: 'center' },
+
+  tableFooter: { backgroundColor: '#d1f7d6' },
+  footerFertCell: { backgroundColor: '#d1f7d6' },
+  totalStageText: { fontSize: 12, fontWeight: 'bold', color: '#111', textAlign: 'left' },
+  totalBagsText: { fontSize: 12, fontWeight: 'bold', color: '#111', textAlign: 'center' },
+
+  progressTrack: {
+    height: 5,
+    backgroundColor: '#e6e6e6',
+    borderTopWidth: 1,
+    borderTopColor: '#ddd',
+  },
+  progressThumb: {
+    height: 5,
+    backgroundColor: '#2e7d32',
+  },
 });

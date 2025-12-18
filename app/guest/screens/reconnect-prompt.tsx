@@ -1,4 +1,4 @@
-// app/(admin)/screens/reconnect-prompt.tsx
+// app/guest/screens/reconnect-prompt.tsx
 import React, { useEffect, useRef } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
@@ -21,7 +21,7 @@ const toNum = (v: any): number | undefined => {
   return Number.isFinite(n) ? n : undefined;
 };
 
-export default function AdminReconnectPromptScreen() {
+export default function ReconnectPromptScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<Params>();
   const { setFromParams, result } = useReadingSession();
@@ -69,14 +69,16 @@ export default function AdminReconnectPromptScreen() {
           });
         }
       } catch (e) {
-        console.warn('[AdminReconnectPrompt] failed to set reading session:', e);
+        console.warn('[ReconnectPrompt] failed to set reading session:', e);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleProceed = () => {
-    router.replace('/admin/screens/recommendation');
+    // ✅ FIX: DO NOT include "/app" in paths.
+    // ✅ FIX: Explicit stakeholder route group.
+    router.replace('/guest/screens/recommendation');
   };
 
   return (

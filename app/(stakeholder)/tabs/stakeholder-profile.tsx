@@ -615,42 +615,7 @@ export default function StakeholderProfileScreen() {
               <DisplayRow label="Farm Location" value={user?.farmLocation} icon="map-outline" />
             </View>
 
-            {/* Notifications */}
-            <Text style={styles.sectionTitle}>Notifications</Text>
-            <View style={styles.box}>
-              <View style={styles.row}>
-                <Ionicons name="notifications-outline" size={20} color={GREEN} />
-                <Text
-                  style={[styles.label, { width: NOTIF_LABEL_W, flexShrink: 1 }]}
-                  numberOfLines={1}
-                >
-                  Push Notifications
-                </Text>
-                <Switch
-                  value={pushNotif}
-                  onValueChange={setPushNotif}
-                  style={styles.switch}
-                  trackColor={{ false: '#ccc', true: '#a5d6a7' }}
-                  thumbColor={pushNotif ? GREEN : '#f4f3f4'}
-                />
-              </View>
-              <View style={styles.row}>
-                <Ionicons name="megaphone-outline" size={20} color={GREEN} />
-                <Text
-                  style={[styles.label, { width: NOTIF_LABEL_W, flexShrink: 1 }]}
-                  numberOfLines={1}
-                >
-                  Promotional Notifications
-                </Text>
-                <Switch
-                  value={promoNotif}
-                  onValueChange={setPromoNotif}
-                  style={styles.switch}
-                  trackColor={{ false: '#ccc', true: '#a5d6a7' }}
-                  thumbColor={promoNotif ? GREEN : '#f4f3f4'}
-                />
-              </View>
-            </View>
+            
 
             {/* More */}
             <Text style={styles.sectionTitle}>More</Text>

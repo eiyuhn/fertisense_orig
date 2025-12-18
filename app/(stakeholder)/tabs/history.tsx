@@ -9,7 +9,6 @@ import {
   ActivityIndicator,
   Alert,
   ScrollView,
-  Platform,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -19,6 +18,27 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useAuth } from '../../../context/AuthContext';
 import { listUserReadings, deleteReading } from '../../../src/services';
 
+type LocalScheduleLine = { code: string; bags: number };
+type LocalSchedule = {
+  organic?: LocalScheduleLine[];
+  basal?: LocalScheduleLine[];
+  after30DAT?: LocalScheduleLine[];
+  topdress60DBH?: LocalScheduleLine[];
+};
+
+type LocalCost = {
+  currency: string;
+  total: number;
+};
+
+type PlanSnapshot = {
+  id: string;
+  label?: string;
+  isCheapest?: boolean;
+  schedule: LocalSchedule;
+  cost: LocalCost | null;
+};
+
 type HistoryItem = {
   id: string;
   date: string;
@@ -26,6 +46,14 @@ type HistoryItem = {
   n_value: number;
   p_value: number;
   k_value: number;
+
+  // ✅ NEW: nutrients needed kg/ha
+  neededKgHa?: { N: number; P: number; K: number };
+
+  // ✅ NEW: selected options
+  variety?: string;
+  soilClass?: string;
+  season?: string;
 
   recommendationText: string;
   englishText?: string;
@@ -36,23 +64,16 @@ type HistoryItem = {
     details?: string[];
   }>;
 
+  // ✅ NEW (from Recommendation persistLocalHistory) -> contains ALL options
+  plansSnapshot?: PlanSnapshot[];
+  selectedPlanId?: string | null;
+
+  // backend / misc (old or remote)
   daSchedule?: any;
   daCost?: any;
   currency?: string;
   npkClass?: string;
 };
-
-function normalizeDetails(details?: string[]): string[] {
-  if (!details) return [];
-  return details.map((d) => (typeof d === 'string' ? d : String(d)));
-}
-
-function phStatusLabel(ph?: number | null): string {
-  if (typeof ph !== 'number' || !Number.isFinite(ph)) return 'N/A';
-  if (ph < 5.5) return 'Acidic';
-  if (ph > 7.5) return 'Alkaline';
-  return 'Neutral';
-}
 
 type Nutrient = 'N' | 'P' | 'K';
 function classifyLevel(nutrient: Nutrient, v?: number): 'LOW' | 'MEDIUM' | 'HIGH' | 'N/A' {
@@ -60,199 +81,36 @@ function classifyLevel(nutrient: Nutrient, v?: number): 'LOW' | 'MEDIUM' | 'HIGH
   const ppm = Math.round(v);
   if (ppm <= 0) return 'N/A';
 
+  // same thresholds as your recommendation
   if (nutrient === 'N') {
-    if (ppm <= 110) return 'LOW';
+    if (ppm < 110) return 'LOW';
     if (ppm <= 145) return 'MEDIUM';
     return 'HIGH';
   }
   if (nutrient === 'P') {
-    if (ppm <= 315) return 'LOW';
+    if (ppm < 315) return 'LOW';
     if (ppm <= 345) return 'MEDIUM';
     return 'HIGH';
   }
-  if (ppm <= 150) return 'LOW';
+  if (ppm < 150) return 'LOW';
   if (ppm <= 380) return 'MEDIUM';
   return 'HIGH';
 }
 
-const NBSP = '\u00A0';
-const NBHY = '\u2011';
+function asArray<T = any>(arr: any): T[] {
+  return Array.isArray(arr) ? (arr as T[]) : [];
+}
 
-function displayCodeNoWrap(code: string) {
-  return String(code || '').replace(/-/g, NBHY);
+function moneyFmt(v: number) {
+  return (v || 0).toFixed(2);
 }
 
 function bagsFmt(b: number) {
   const n = Number.isFinite(b) ? b : 0;
-  return `${n.toFixed(2)}${NBSP}bags`;
+  return `${n.toFixed(2)} bags`;
 }
 
-type StageKey = 'ORGANIC' | 'BASAL' | 'AFTER30' | 'TOPDRESS';
-type StageMap = Record<StageKey, Record<string, number>>;
-
-function emptyStageMap(): StageMap {
-  return { ORGANIC: {}, BASAL: {}, AFTER30: {}, TOPDRESS: {} };
-}
-
-function addStage(map: Record<string, number>, codeLike: any, bagsLike: any) {
-  const c = String(codeLike ?? '').trim();
-  if (!c) return;
-  const b = Number(bagsLike ?? 0);
-  if (!Number.isFinite(b) || b <= 0) return;
-  map[c] = (map[c] || 0) + b;
-}
-
-function pickFirst<T = any>(obj: any, keys: string[]): T | undefined {
-  if (!obj) return undefined;
-  for (const k of keys) {
-    if (obj[k] != null) return obj[k] as T;
-  }
-  return undefined;
-}
-
-function normalizeStageItems(stage: any): Array<{ code: string; bags: number }> {
-  if (!stage) return [];
-  if (Array.isArray(stage)) {
-    return stage
-      .map((it) => {
-        const code =
-          it?.code ??
-          it?.fertilizerCode ??
-          it?.key ??
-          it?.name ??
-          it?.label ??
-          it?.fertilizer ??
-          it?.type;
-        const bags = it?.bags ?? it?.qty ?? it?.quantity ?? it?.sacks ?? it?.bagCount;
-        return { code: String(code ?? '').trim(), bags: Number(bags ?? 0) };
-      })
-      .filter((x) => x.code && Number.isFinite(x.bags) && x.bags > 0);
-  }
-  if (typeof stage === 'object') {
-    return Object.entries(stage)
-      .map(([k, v]) => ({ code: String(k).trim(), bags: Number(v ?? 0) }))
-      .filter((x) => x.code && Number.isFinite(x.bags) && x.bags > 0);
-  }
-  return [];
-}
-
-function buildScheduleFromPlanDetails(plan?: { name?: string; cost?: string; details?: string[] }) {
-  if (!plan) return null;
-  const details = normalizeDetails(plan.details);
-  if (!details.length) return null;
-
-  const stages = emptyStageMap();
-  const totals: Record<string, number> = {};
-  let current: StageKey | null = null;
-
-  const detectStage = (line: string): StageKey | null => {
-    const s = line.toLowerCase();
-    if (s.includes('organic') || s.includes('before planting') || s.includes('pre-plant')) return 'ORGANIC';
-    if (s.includes('basal') || s.includes('sa pagtanim') || s.includes('sa pagtanom') || s.includes('pagtanom'))
-      return 'BASAL';
-    if (s.includes('30') || s.includes('after30') || s.includes('pagkatapos') || s.includes('pagkahuman') || s.includes('ika 30'))
-      return 'AFTER30';
-    if (s.includes('top dress') || s.includes('topdress') || s.includes('60') || s.includes('dbh') || s.includes('third'))
-      return 'TOPDRESS';
-    return null;
-  };
-
-  const parseLine = (line: string): { code: string; bags: number } | null => {
-    const raw = String(line).trim();
-    if (!raw) return null;
-
-    let m = raw.match(/^([^:]+):\s*([0-9]+(\.[0-9]+)?)\s*bags?/i);
-    if (m) return { code: String(m[1]).trim(), bags: Number(m[2]) };
-
-    m = raw.match(/^(.+?)\s*[-–]\s*([0-9]+(\.[0-9]+)?)\s*bags?/i);
-    if (m) return { code: String(m[1]).trim(), bags: Number(m[2]) };
-
-    m = raw.match(/([0-9]{1,2}\s*-\s*[0-9]{1,2}\s*-\s*[0-9]{1,2}).*?([0-9]+(\.[0-9]+)?)\s*bags?/i);
-    if (m) return { code: m[1].replace(/\s+/g, ''), bags: Number(m[2]) };
-
-    m = raw.match(/^(organic fertilizer[^:]*)[:\-–]\s*([0-9]+(\.[0-9]+)?)\s*bags?/i);
-    if (m) return { code: String(m[1]).trim(), bags: Number(m[2]) };
-
-    return null;
-  };
-
-  for (const rawLine of details) {
-    const line = String(rawLine).trim();
-    if (!line) continue;
-
-    const headerCandidate = line.replace(/:\s*$/, '').trim();
-    const st = detectStage(headerCandidate);
-    const parsed = parseLine(line);
-
-    if (st && !parsed) {
-      current = st;
-      continue;
-    }
-
-    if (parsed && current) {
-      addStage(stages[current], parsed.code, parsed.bags);
-      addStage(totals, parsed.code, parsed.bags);
-      continue;
-    }
-
-    if (parsed && !current) {
-      addStage(stages.BASAL, parsed.code, parsed.bags);
-      addStage(totals, parsed.code, parsed.bags);
-    }
-  }
-
-  const any =
-    Object.keys(stages.ORGANIC).length ||
-    Object.keys(stages.BASAL).length ||
-    Object.keys(stages.AFTER30).length ||
-    Object.keys(stages.TOPDRESS).length;
-
-  if (!any) return null;
-
-  return {
-    stages,
-    totals,
-    title: plan.name ? String(plan.name) : 'Fertilizer Plan',
-    totalCostText: plan.cost ? String(plan.cost) : 'N/A',
-  };
-}
-
-function buildScheduleFromDaSchedule(item: HistoryItem) {
-  const sch = (item as any)?.daSchedule;
-  const cost = (item as any)?.daCost;
-  const currency = (cost?.currency || item.currency || 'PHP') as string;
-  const npkClass = (item as any)?.npkClass ? String((item as any).npkClass) : '';
-
-  if (!sch) return null;
-
-  const stages = emptyStageMap();
-  const totals: Record<string, number> = {};
-
-  const organicRaw = pickFirst(sch, ['organic', 'beforePlanting', 'prePlanting', 'organicApplication']);
-  const basalRaw = pickFirst(sch, ['basal', 'saPagtanim', 'atPlanting', 'planting', 'basalApplication', 'basalApp']);
-  const after30Raw = pickFirst(sch, ['after30DAT', 'after30Dat', 'after30', 'second', 'secondApplication', '30DAT', 'dat30', 'after30Days']);
-  const topdressRaw = pickFirst(sch, ['topdress60DBH', 'topdress60dbh', 'topdress', 'third', 'topDress', '60DBH', 'dbh60', 'topdress60']);
-
-  const organic = normalizeStageItems(organicRaw);
-  const basal = normalizeStageItems(basalRaw);
-  const after30 = normalizeStageItems(after30Raw);
-  const topdress = normalizeStageItems(topdressRaw);
-
-  organic.forEach((it) => { addStage(stages.ORGANIC, it.code, it.bags); addStage(totals, it.code, it.bags); });
-  basal.forEach((it) => { addStage(stages.BASAL, it.code, it.bags); addStage(totals, it.code, it.bags); });
-  after30.forEach((it) => { addStage(stages.AFTER30, it.code, it.bags); addStage(totals, it.code, it.bags); });
-  topdress.forEach((it) => { addStage(stages.TOPDRESS, it.code, it.bags); addStage(totals, it.code, it.bags); });
-
-  const totalCostText = cost?.total != null ? `${currency} ${Number(cost.total || 0).toFixed(2)}` : `${currency} 0.00`;
-  const any =
-    Object.keys(stages.ORGANIC).length ||
-    Object.keys(stages.BASAL).length ||
-    Object.keys(stages.AFTER30).length ||
-    Object.keys(stages.TOPDRESS).length;
-
-  if (!any) return null;
-  return { stages, totals, title: `DA Recommendation${npkClass ? ` (${npkClass})` : ''}`, totalCostText };
-}
+const ORGANIC_FERT_CODE = 'Organic Fertilizer';
 
 const FERTILIZER_NAMES: Record<string, string> = {
   '46-0-0': 'Urea',
@@ -261,8 +119,194 @@ const FERTILIZER_NAMES: Record<string, string> = {
   '18-46-0': 'Diammonium Phosphate (DAP)',
   '16-20-0': 'Ammophos',
   '14-14-14': 'Complete Fertilizer',
-  'Organic Fertilizer': 'Organic',
+  [ORGANIC_FERT_CODE]: 'Organic Fertilizer',
 };
+
+const STAGE_COL_W = 190;
+const COL_W = 130;
+
+function ScrollProgress({ progress01 }: { progress01: number }) {
+  const p = Math.max(0, Math.min(1, Number(progress01 || 0)));
+  return (
+    <View style={styles.progressTrack}>
+      <View style={[styles.progressThumb, { width: `${Math.max(15, p * 100)}%` }]} />
+    </View>
+  );
+}
+
+function normalizePlanToSchedule(p: PlanSnapshot) {
+  const s = p?.schedule || {};
+  return {
+    organic: asArray(s.organic),
+    basal: asArray(s.basal),
+    after30DAT: asArray(s.after30DAT),
+    topdress60DBH: asArray(s.topdress60DBH),
+  } as LocalSchedule;
+}
+
+function PlanTableCardHistory({
+  p,
+  idx,
+  currency,
+}: {
+  p: PlanSnapshot;
+  idx: number;
+  currency: string | null;
+}) {
+  const cur = p?.cost?.currency || currency || 'PHP';
+  const fixedSchedule = normalizePlanToSchedule(p);
+
+  const fertCodes = Array.from(
+    new Set([
+      ...asArray(fixedSchedule.organic).map((x: any) => String(x.code)),
+      ...asArray(fixedSchedule.basal).map((x: any) => String(x.code)),
+      ...asArray(fixedSchedule.after30DAT).map((x: any) => String(x.code)),
+      ...asArray(fixedSchedule.topdress60DBH).map((x: any) => String(x.code)),
+    ])
+  );
+
+  const stageBags = (stageArr: any[] | undefined, code: string) => {
+    const a = asArray(stageArr);
+    const it = a.find((x: any) => String(x.code) === String(code));
+    return it ? Number(it.bags || 0) : 0;
+  };
+
+  const totalsByCode: Record<string, number> = {};
+  const addTotals = (arr?: any[]) =>
+    asArray(arr).forEach((x: any) => {
+      const c = String(x.code);
+      totalsByCode[c] = (totalsByCode[c] || 0) + Number(x.bags || 0);
+    });
+
+  addTotals(fixedSchedule.organic);
+  addTotals(fixedSchedule.basal);
+  addTotals(fixedSchedule.after30DAT);
+  addTotals(fixedSchedule.topdress60DBH);
+
+  const optionLabel = `Fertilization Recommendation Option ${idx + 1}`;
+  const contentWidth = STAGE_COL_W + fertCodes.length * COL_W;
+
+  const [progress01, setProgress01] = React.useState(0);
+
+  return (
+    <View style={styles.table}>
+      <View style={styles.tableHeader}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.tableTitle}>{optionLabel}</Text>
+          <View style={styles.badgeRow}>
+            {p.isCheapest ? <Text style={styles.badge}>Cheapest</Text> : null}
+          </View>
+        </View>
+
+        <View style={{ alignItems: 'flex-end' }}>
+          <Text style={styles.priceTag}>
+            {cur} {moneyFmt(Number(p?.cost?.total || 0))}
+          </Text>
+        </View>
+      </View>
+
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        nestedScrollEnabled
+        directionalLockEnabled
+        onScroll={(e) => {
+          const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+          const max = Math.max(1, contentSize.width - layoutMeasurement.width);
+          const pr = Math.max(0, Math.min(1, contentOffset.x / max));
+          setProgress01(pr);
+        }}
+        scrollEventThrottle={16}
+      >
+        <View style={{ minWidth: contentWidth }}>
+          <View style={[styles.tableRow, styles.headerRow]}>
+            <View style={[styles.stageCell, styles.stageHeaderCell]}>
+              <Text style={styles.stageHeaderText}>Stages</Text>
+            </View>
+
+            {fertCodes.map((code) => (
+              <View key={`hdr-${p.id}-${code}`} style={styles.fertHeaderCell}>
+                <Text style={styles.headerCodeText} numberOfLines={1}>
+                  {code}
+                </Text>
+                <Text style={styles.headerNameText} numberOfLines={2}>
+                  {FERTILIZER_NAMES[code] || 'Fertilizer'}
+                </Text>
+              </View>
+            ))}
+          </View>
+
+          <View style={styles.tableRow}>
+            <View style={styles.stageCell}>
+              <Text style={styles.stageText}>Organic Fertilizer (14 - 30 days ayha sa pagtanom)</Text>
+            </View>
+            {fertCodes.map((code) => (
+              <View key={`org-${p.id}-${code}`} style={styles.fertCell}>
+                <Text style={styles.bagsText} numberOfLines={1}>
+                  {bagsFmt(stageBags(fixedSchedule.organic, code))}
+                </Text>
+              </View>
+            ))}
+          </View>
+
+          <View style={styles.tableRow}>
+            <View style={styles.stageCell}>
+              <Text style={styles.stageText}>Sa Pagtanom</Text>
+            </View>
+            {fertCodes.map((code) => (
+              <View key={`basal-${p.id}-${code}`} style={styles.fertCell}>
+                <Text style={styles.bagsText} numberOfLines={1}>
+                  {bagsFmt(stageBags(fixedSchedule.basal, code))}
+                </Text>
+              </View>
+            ))}
+          </View>
+
+          <View style={styles.tableRow}>
+            <View style={styles.stageCell}>
+              <Text style={styles.stageText}>Pagkahuman sa ika 30 na adlaw</Text>
+            </View>
+            {fertCodes.map((code) => (
+              <View key={`30-${p.id}-${code}`} style={styles.fertCell}>
+                <Text style={styles.bagsText} numberOfLines={1}>
+                  {bagsFmt(stageBags(fixedSchedule.after30DAT, code))}
+                </Text>
+              </View>
+            ))}
+          </View>
+
+          <View style={styles.tableRow}>
+            <View style={styles.stageCell}>
+              <Text style={styles.stageText}>Top Dress (60 days ayha sa pag harvest)</Text>
+            </View>
+            {fertCodes.map((code) => (
+              <View key={`top-${p.id}-${code}`} style={styles.fertCell}>
+                <Text style={styles.bagsText} numberOfLines={1}>
+                  {bagsFmt(stageBags(fixedSchedule.topdress60DBH, code))}
+                </Text>
+              </View>
+            ))}
+          </View>
+
+          <View style={[styles.tableRow, styles.tableFooter]}>
+            <View style={[styles.stageCell, styles.stageFooterCell]}>
+              <Text style={styles.totalStageText}>Total Bags</Text>
+            </View>
+            {fertCodes.map((code) => (
+              <View key={`tot-${p.id}-${code}`} style={[styles.fertCell, styles.footerFertCell]}>
+                <Text style={styles.totalBagsText} numberOfLines={1}>
+                  {bagsFmt(totalsByCode[code] || 0)}
+                </Text>
+              </View>
+            ))}
+          </View>
+        </View>
+      </ScrollView>
+
+      {fertCodes.length >= 3 ? <ScrollProgress progress01={progress01} /> : null}
+    </View>
+  );
+}
 
 export default function HistoryScreen() {
   const { user, token } = useAuth();
@@ -275,23 +319,29 @@ export default function HistoryScreen() {
   const userKey = useMemo(() => (user?._id ? `history:${user._id}` : null), [user?._id]);
   const isObjectId = (s?: string) => !!s && /^[a-f0-9]{24}$/i.test(s);
 
-  const migrateLegacyIfNeeded = useCallback(async () => {
-    if (!userKey) return;
-    try {
-      const legacyKey = 'history';
-      const legacy = await AsyncStorage.getItem(legacyKey);
-      const current = await AsyncStorage.getItem(userKey);
-      if (legacy && !current) {
-        await AsyncStorage.setItem(userKey, legacy);
-        await AsyncStorage.removeItem(legacyKey);
-      }
-    } catch {}
-  }, [userKey]);
+  const fingerprint = (h: Partial<HistoryItem>) => {
+    const date = String(h?.date || '').trim();
+    const phNum = Number(String(h?.ph || '').match(/([0-9]+(\.[0-9]+)?)/)?.[1] || 0);
+    const phRound = Number.isFinite(phNum) ? phNum.toFixed(1) : '0.0';
+    const n = Number(h?.n_value ?? 0);
+    const p = Number(h?.p_value ?? 0);
+    const k = Number(h?.k_value ?? 0);
+
+    const variety = String(h?.variety || '').trim();
+    const soilClass = String(h?.soilClass || '').trim();
+    const season = String(h?.season || '').trim();
+
+    return `${date}|${phRound}|${n}|${p}|${k}|${variety}|${soilClass}|${season}`;
+  };
 
   const parseLocalHistory = (stored: string | null): HistoryItem[] => {
     if (!stored) return [];
     let parsed: unknown;
-    try { parsed = JSON.parse(stored); } catch { return []; }
+    try {
+      parsed = JSON.parse(stored);
+    } catch {
+      return [];
+    }
     const arr = Array.isArray(parsed) ? parsed : [];
     return arr
       .map((h: any) => ({
@@ -301,15 +351,22 @@ export default function HistoryScreen() {
         n_value: Number(h?.n_value ?? 0),
         p_value: Number(h?.p_value ?? 0),
         k_value: Number(h?.k_value ?? 0),
+
+        neededKgHa: h?.neededKgHa
+          ? { N: Number(h.neededKgHa.N || 0), P: Number(h.neededKgHa.P || 0), K: Number(h.neededKgHa.K || 0) }
+          : undefined,
+
+        variety: h?.variety ? String(h.variety) : undefined,
+        soilClass: h?.soilClass ? String(h.soilClass) : undefined,
+        season: h?.season ? String(h.season) : undefined,
+
         recommendationText: String(h?.recommendationText ?? ''),
         englishText: h?.englishText ? String(h.englishText) : undefined,
-        fertilizerPlans: Array.isArray(h?.fertilizerPlans)
-          ? h.fertilizerPlans.map((p: any) => ({
-              name: p?.name ? String(p.name) : undefined,
-              cost: p?.cost ? String(p.cost) : undefined,
-              details: normalizeDetails(p?.details),
-            }))
-          : [],
+
+        fertilizerPlans: Array.isArray(h?.fertilizerPlans) ? h.fertilizerPlans : [],
+        plansSnapshot: Array.isArray(h?.plansSnapshot) ? h.plansSnapshot : [],
+        selectedPlanId: h?.selectedPlanId ?? null,
+
         daSchedule: h?.daSchedule,
         daCost: h?.daCost,
         currency: h?.currency,
@@ -319,25 +376,37 @@ export default function HistoryScreen() {
   };
 
   const mapRemoteReadingToHistory = (r: any): HistoryItem => {
-    const created = (r?.createdAt && new Date(r.createdAt)) || (r?.updatedAt && new Date(r.updatedAt)) || new Date();
+    const created =
+      (r?.createdAt && new Date(r.createdAt)) ||
+      (r?.updatedAt && new Date(r.updatedAt)) ||
+      new Date();
+
     let dateStr = 'Unknown Date';
-    try { dateStr = created.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }); } catch {}
+    try {
+      dateStr = created.toLocaleDateString('en-US', {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+      });
+    } catch {}
 
     const pHNum =
-      typeof r?.pH === 'number' && Number.isFinite(r.pH) ? r.pH :
-      typeof r?.ph === 'number' && Number.isFinite(r.ph) ? r.ph : undefined;
+      typeof r?.pH === 'number' && Number.isFinite(r.pH)
+        ? r.pH
+        : typeof r?.ph === 'number' && Number.isFinite(r.ph)
+        ? r.ph
+        : undefined;
 
-    const phStat = phStatusLabel(pHNum);
-    const phStr = pHNum !== undefined ? `${pHNum.toFixed(1)} (${phStat})` : 'N/A';
+    const phStatus =
+      typeof pHNum === 'number' && Number.isFinite(pHNum)
+        ? pHNum < 5.5
+          ? 'Acidic'
+          : pHNum > 7.5
+          ? 'Alkaline'
+          : 'Neutral'
+        : 'N/A';
 
-    const fertPlans =
-      Array.isArray(r?.fertilizerPlans) && r.fertilizerPlans.length
-        ? r.fertilizerPlans.map((p: any) => ({
-            name: p?.name ? String(p.name) : undefined,
-            cost: p?.cost ? String(p.cost) : undefined,
-            details: normalizeDetails(p?.details),
-          }))
-        : [];
+    const phStr = pHNum !== undefined ? `${pHNum.toFixed(1)} (${phStatus})` : 'N/A';
 
     return {
       id: String(r?._id ?? `reading_${created.getTime()}`),
@@ -346,9 +415,25 @@ export default function HistoryScreen() {
       n_value: Number(r?.N ?? r?.n ?? 0),
       p_value: Number(r?.P ?? r?.p ?? 0),
       k_value: Number(r?.K ?? r?.k ?? 0),
+
+      // backend may or may not have these
+      neededKgHa: r?.neededKgHa
+        ? { N: Number(r.neededKgHa.N || 0), P: Number(r.neededKgHa.P || 0), K: Number(r.neededKgHa.K || 0) }
+        : undefined,
+
+      variety: r?.variety ? String(r.variety) : undefined,
+      soilClass: r?.soilClass ? String(r.soilClass) : undefined,
+      season: r?.season ? String(r.season) : undefined,
+
       recommendationText: typeof r?.recommendationText === 'string' ? r.recommendationText : '',
       englishText: typeof r?.englishText === 'string' ? r.englishText : undefined,
-      fertilizerPlans: fertPlans,
+
+      fertilizerPlans: Array.isArray(r?.fertilizerPlans) ? r.fertilizerPlans : [],
+
+      // remote usually does NOT have all options
+      plansSnapshot: Array.isArray(r?.plansSnapshot) ? r.plansSnapshot : [],
+      selectedPlanId: r?.selectedPlanId ?? null,
+
       daSchedule: r?.daSchedule,
       daCost: r?.daCost,
       currency: r?.currency,
@@ -356,17 +441,15 @@ export default function HistoryScreen() {
     };
   };
 
-  const fingerprint = (h: HistoryItem) => {
-    const phNum = Number(String(h.ph || '').match(/([0-9]+(\.[0-9]+)?)/)?.[1] || 0);
-    const phRound = Number.isFinite(phNum) ? phNum.toFixed(1) : '0.0';
-    return `${(h.date || '').trim()}|${phRound}|${h.n_value}|${h.p_value}|${h.k_value}|${(h.npkClass || '').trim()}`;
-  };
-
   const loadHistory = useCallback(async () => {
-    if (!userKey) { setHistory([]); setLoading(false); return; }
+    if (!userKey) {
+      setHistory([]);
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     try {
-      await migrateLegacyIfNeeded();
       const stored = await AsyncStorage.getItem(userKey);
       const localItems = parseLocalHistory(stored);
 
@@ -378,15 +461,30 @@ export default function HistoryScreen() {
         } catch {}
       }
 
+      // ✅ Merge by fingerprint and prefer the item that has ALL options (plansSnapshot)
       const map = new Map<string, HistoryItem>();
-      for (const h of localItems) map.set(fingerprint(h), h);
-      for (const h of remoteItems) map.set(fingerprint(h), h);
+      const put = (h: HistoryItem) => {
+        const key = fingerprint(h);
+        const prev = map.get(key);
+        if (!prev) {
+          map.set(key, h);
+          return;
+        }
+        const prevHas = (prev.plansSnapshot?.length || 0) > 0;
+        const curHas = (h.plansSnapshot?.length || 0) > 0;
+        if (!prevHas && curHas) map.set(key, h);
+      };
+
+      localItems.forEach(put);
+      remoteItems.forEach(put);
 
       const merged = Array.from(map.values());
 
+      // Save only locals back
       const localsOnly = merged.filter((h) => !isObjectId(h.id));
       await AsyncStorage.setItem(userKey, JSON.stringify(localsOnly));
 
+      // Sort newest-ish
       merged.sort((a, b) => {
         const getTimeFromId = (id: string): number => {
           if (id.startsWith('reading_')) {
@@ -410,9 +508,13 @@ export default function HistoryScreen() {
     } finally {
       setLoading(false);
     }
-  }, [migrateLegacyIfNeeded, userKey, token]);
+  }, [userKey, token]);
 
-  useFocusEffect(useCallback(() => { loadHistory(); }, [loadHistory]));
+  useFocusEffect(
+    useCallback(() => {
+      loadHistory();
+    }, [loadHistory])
+  );
 
   const handleDelete = (id: string) => {
     Alert.alert('Delete Entry', 'Are you sure you want to delete this history?', [
@@ -441,127 +543,26 @@ export default function HistoryScreen() {
     ]);
   };
 
-  const STAGES_LABELS: Record<StageKey, string> = {
-    ORGANIC: 'Organic Fertilizer (14 - 30 days ayha sa pagtanom)',
-    BASAL: 'Sa Pagtanom',
-    AFTER30: 'Pagkahuman sa ika 30 na adlaw',
-    TOPDRESS: 'Top Dress (60 days ayha sa pag harvest)',
-  };
-
-  function parseTitleParts(rawTitle: string) {
-    const t = String(rawTitle || '').trim();
-    const lower = t.toLowerCase();
-    const isCheapest = lower.includes('cheapest');
-    const cleaned = t.replace(/[-•|·]\s*cheapest\s*/i, ' ').replace(/\s{2,}/g, ' ').trim();
-    return { titleMain: cleaned, isCheapest };
-  }
-
-  const renderOnePlanBox = (built: any, boxKey: string) => {
-    const { stages, totals, title, totalCostText } = built;
-
-    const { titleMain, isCheapest } = parseTitleParts(title);
-
-    const fertCodes = Array.from(
-      new Set([
-        ...Object.keys(stages.ORGANIC),
-        ...Object.keys(stages.BASAL),
-        ...Object.keys(stages.AFTER30),
-        ...Object.keys(stages.TOPDRESS),
-        ...Object.keys(totals),
-      ])
-    ).sort((a, b) => a.localeCompare(b));
-
-    if (!fertCodes.length) return null;
-
-    // ✅ show hint only if table has many columns (meaning it will scroll)
-    const shouldHint = fertCodes.length >= 3;
-
-    const row = (label: string, map: Record<string, number>, isHeader = false) => (
-      <View style={[styles.planRow, isHeader && styles.planHeaderRow]}>
-        <View style={styles.planCellStageFixed}>
-          <Text style={[styles.stageText, isHeader && styles.planHeaderText]} numberOfLines={isHeader ? 1 : 3}>
-            {label}
-          </Text>
-        </View>
-
-        {fertCodes.map((code) => (
-          <View key={`${boxKey}-${label}-${code}`} style={styles.planCellFixed}>
-            {isHeader ? (
-              <View style={styles.headerCellWrap}>
-                <Text style={[styles.planHeaderText, styles.headerCode]} numberOfLines={1}>
-                  {displayCodeNoWrap(code)}
-                </Text>
-                <Text style={styles.headerName} numberOfLines={2}>
-                  {FERTILIZER_NAMES[code] || 'Fertilizer'}
-                </Text>
-              </View>
-            ) : (
-              <Text style={styles.cellValue} numberOfLines={1}>
-                {bagsFmt(map[code] || 0)}
-              </Text>
-            )}
-          </View>
-        ))}
-      </View>
-    );
-
-    return (
-      <View key={boxKey} style={styles.planBoxNew}>
-        <View style={styles.planHeaderBlock}>
-          <View style={styles.planHeaderLine}>
-            <Text style={styles.planTitleNew} numberOfLines={2}>
-              {titleMain}
-            </Text>
-            <Text style={styles.planCostNew} numberOfLines={1}>
-              {totalCostText}
-            </Text>
-          </View>
-
-          {isCheapest ? (
-            <View style={styles.cheapestRow}>
-              <Text style={styles.cheapestChip}>Cheapest</Text>
-            </View>
-          ) : null}
-        </View>
-
-        
-
-        {/* ✅ Horizontal scroll indicator ON */}
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator
-          indicatorStyle={Platform.OS === 'ios' ? 'black' : undefined}
-        >
-          <View>
-            {row('Stages', {}, true)}
-            {row(STAGES_LABELS.ORGANIC, stages.ORGANIC)}
-            {row(STAGES_LABELS.BASAL, stages.BASAL)}
-            {row(STAGES_LABELS.AFTER30, stages.AFTER30)}
-            {row(STAGES_LABELS.TOPDRESS, stages.TOPDRESS)}
-            {row('Total Bags', totals)}
-          </View>
-        </ScrollView>
-      </View>
-    );
-  };
-
-  const renderAllPlans = (item: HistoryItem) => {
-    const plans = Array.isArray(item.fertilizerPlans) ? item.fertilizerPlans : [];
-    const boxes = plans
-      .map((p, idx) => {
-        const built = buildScheduleFromPlanDetails(p);
-        return built ? renderOnePlanBox(built, `${item.id}-plan-${idx}`) : null;
-      })
-      .filter(Boolean);
-
-    if (boxes.length) return <View style={{ gap: 10 }}>{boxes as any}</View>;
-
-    const builtDa = buildScheduleFromDaSchedule(item);
-    return builtDa ? renderOnePlanBox(builtDa, `${item.id}-da`) : null;
-  };
-
   const renderItem = ({ item }: { item: HistoryItem }) => {
     const isExpanded = expandedId === item.id;
+
+    const plansSnap = Array.isArray(item.plansSnapshot) ? item.plansSnapshot : [];
+
+    // If old entry: fallback to chosen schedule only
+    const fallbackOne: PlanSnapshot[] =
+      !plansSnap.length && item.daSchedule
+        ? [
+            {
+              id: 'CHOSEN',
+              label: 'Chosen Plan',
+              isCheapest: false,
+              schedule: item.daSchedule,
+              cost: item.daCost || null,
+            },
+          ]
+        : [];
+
+    const plansToRender = plansSnap.length ? plansSnap : fallbackOne;
 
     return (
       <View style={styles.card}>
@@ -569,9 +570,24 @@ export default function HistoryScreen() {
           <View style={styles.headerLeft}>
             <Text style={styles.date}>{item.date}</Text>
             <Text style={styles.subText}>pH: {item.ph}</Text>
+
             <Text style={styles.npkText}>
               N:{classifyLevel('N', item.n_value)} | P:{classifyLevel('P', item.p_value)} | K:{classifyLevel('K', item.k_value)}
             </Text>
+
+            {/* ✅ SHOW nutrients needed */}
+            {item.neededKgHa ? (
+              <Text style={styles.metaText}>
+                Nutrients needed (kg/ha): N {Number(item.neededKgHa.N || 0)} • P {Number(item.neededKgHa.P || 0)} • K {Number(item.neededKgHa.K || 0)}
+              </Text>
+            ) : null}
+
+            {/* ✅ SHOW selected options */}
+            {(item.variety || item.soilClass || item.season) ? (
+              <Text style={styles.metaText}>
+                Selected: {String(item.variety || '')} • {String(item.soilClass || '')} • {String(item.season || '')}
+              </Text>
+            ) : null}
           </View>
 
           <TouchableOpacity onPress={() => handleDelete(item.id)} style={styles.deleteButton}>
@@ -586,7 +602,20 @@ export default function HistoryScreen() {
 
         {isExpanded && (
           <View style={styles.details}>
-            {renderAllPlans(item) || <Text style={styles.detailsText}>No plans saved.</Text>}
+            {plansToRender.length ? (
+              <View style={{ gap: 12 }}>
+                {plansToRender.map((p, idx) => (
+                  <PlanTableCardHistory
+                    key={`${item.id}-${p.id}-${idx}`}
+                    p={p}
+                    idx={idx}
+                    currency={item.currency || null}
+                  />
+                ))}
+              </View>
+            ) : (
+              <Text style={styles.detailsText}>No plans saved.</Text>
+            )}
           </View>
         )}
       </View>
@@ -622,9 +651,6 @@ export default function HistoryScreen() {
   );
 }
 
-const STAGE_COL_W = 170;
-const COL_W = 120;
-
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: '#f8f9fa' },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
@@ -653,8 +679,9 @@ const styles = StyleSheet.create({
   cardHeader: { flexDirection: 'row', justifyContent: 'space-between' },
   headerLeft: { flex: 1 },
   date: { fontWeight: 'bold', fontSize: 14, color: '#333' },
-  subText: { fontSize: 12, color: '#666' },
-  npkText: { fontSize: 11, color: '#888' },
+  subText: { fontSize: 12, color: '#666', marginTop: 2 },
+  npkText: { fontSize: 11, color: '#888', marginTop: 2 },
+  metaText: { fontSize: 11, color: '#666', marginTop: 4 },
   deleteButton: { padding: 4 },
   seeMoreBtn: { flexDirection: 'row', alignItems: 'center', marginTop: 10 },
   seeMoreText: { fontSize: 12, fontWeight: '600', color: '#2e7d32', marginRight: 4 },
@@ -662,74 +689,79 @@ const styles = StyleSheet.create({
   detailsText: { fontSize: 12, color: '#666' },
   loadingText: { marginTop: 8, color: '#666' },
 
-  planBoxNew: {
-    marginTop: 5,
-    padding: 8,
-    backgroundColor: '#f1f8f2',
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#d7eadb',
+  table: { marginBottom: 6, borderWidth: 1, borderColor: '#ccc', borderRadius: 10, overflow: 'hidden' },
+  tableHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    backgroundColor: '#f0f0f0',
+    padding: 10,
+    gap: 10,
   },
+  tableTitle: { fontSize: 14, fontWeight: 'bold' },
 
-  planHeaderBlock: { marginBottom: 8 },
-  planHeaderLine: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 },
-  planTitleNew: { flex: 1, fontWeight: 'bold', fontSize: 12, color: '#1b5e20' },
-  planCostNew: { fontWeight: 'bold', fontSize: 12, color: '#1b5e20' },
-  cheapestRow: { marginTop: 6 },
-  cheapestChip: {
-    alignSelf: 'flex-start',
-    backgroundColor: '#e8f5e9',
-    borderWidth: 1,
-    borderColor: '#b9dfbf',
+  badgeRow: { flexDirection: 'row', gap: 8, marginTop: 6, flexWrap: 'wrap' },
+  badge: {
+    fontSize: 11,
     color: '#1b5e20',
-    fontWeight: '700',
-    fontSize: 10,
+    backgroundColor: '#eef7ee',
+    borderColor: '#cfe7d4',
+    borderWidth: 1,
     paddingHorizontal: 8,
-    paddingVertical: 3,
+    paddingVertical: 2,
     borderRadius: 999,
+    overflow: 'hidden',
   },
 
-  // ✅ Swipe hint styles
-  scrollHint: {
-    flexDirection: 'row',
+  priceTag: {
+    backgroundColor: '#5D9239',
+    color: '#fff',
+    fontWeight: 'bold',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 10,
+    fontSize: 13,
+    alignSelf: 'flex-start',
+  },
+
+  tableRow: { flexDirection: 'row', borderTopWidth: 1, borderColor: '#ddd' },
+  headerRow: { backgroundColor: '#e8f5e9' },
+
+  stageCell: { width: 190, padding: 10, justifyContent: 'center' },
+  stageHeaderCell: { backgroundColor: '#e8f5e9' },
+  stageFooterCell: { backgroundColor: '#d1f7d6' },
+
+  fertHeaderCell: {
+    width: 130,
+    paddingVertical: 10,
+    paddingHorizontal: 8,
     alignItems: 'center',
-    alignSelf: 'flex-end',
-    marginBottom: 6,
-    opacity: 0.8,
+    justifyContent: 'center',
+    backgroundColor: '#e8f5e9',
   },
-  scrollHintText: {
-    fontSize: 10,
-    color: '#2e7d32',
-    marginHorizontal: 6,
-    fontWeight: '600',
-  },
+  fertCell: { width: 130, padding: 10, alignItems: 'center', justifyContent: 'center' },
 
-  planRow: {
-    flexDirection: 'row',
+  stageHeaderText: { fontSize: 12, fontWeight: 'bold', color: '#1b5e20', textAlign: 'left' },
+  stageText: { fontSize: 12, color: '#222', textAlign: 'left' },
+
+  headerCodeText: { fontSize: 12, fontWeight: '800', color: '#1b5e20', textAlign: 'center' },
+  headerNameText: { marginTop: 2, fontSize: 10, color: '#2f3b30', textAlign: 'center', lineHeight: 13 },
+
+  bagsText: { fontSize: 12, color: '#222', textAlign: 'center' },
+
+  tableFooter: { backgroundColor: '#d1f7d6' },
+  footerFertCell: { backgroundColor: '#d1f7d6' },
+  totalStageText: { fontSize: 12, fontWeight: 'bold', color: '#111', textAlign: 'left' },
+  totalBagsText: { fontSize: 12, fontWeight: 'bold', color: '#111', textAlign: 'center' },
+
+  progressTrack: {
+    height: 5,
+    backgroundColor: '#e6e6e6',
     borderTopWidth: 1,
-    borderTopColor: '#dfeee2',
-    paddingVertical: 8,
-    alignItems: 'center',
+    borderTopColor: '#ddd',
   },
-  planHeaderRow: { backgroundColor: '#e8f5e9' },
-
-  planCellStageFixed: {
-    width: STAGE_COL_W,
-    paddingRight: 8,
-    justifyContent: 'center',
+  progressThumb: {
+    height: 5,
+    backgroundColor: '#2e7d32',
   },
-  stageText: { fontSize: 10, color: '#333' },
-
-  planCellFixed: {
-    width: COL_W,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 4,
-  },
-
-  planHeaderText: { fontWeight: 'bold', color: '#1b5e20' },
-  headerCellWrap: { alignItems: 'center' },
-  headerCode: { fontSize: 11, textAlign: 'center' },
-  headerName: { fontSize: 9, color: '#444', textAlign: 'center' },
-  cellValue: { fontSize: 10, textAlign: 'center' },
 });

@@ -1,7 +1,8 @@
+// app/(stakeholder)/screens/select-options.tsx
 import { Ionicons } from '@expo/vector-icons';
 import { Picker } from '@react-native-picker/picker';
 import { useRouter, useLocalSearchParams } from 'expo-router';
-import { useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import {
   Platform,
   SafeAreaView,
@@ -10,20 +11,82 @@ import {
   Text,
   TouchableOpacity,
   View,
+  Alert,
 } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
+
+import { useReadingSession } from '../../../context/ReadingSessionContext';
+import { useAuth } from '../../../context/AuthContext';
+import { ensureEsp32Reachable, ESP_SSID } from '../../../src/esp32';
 
 export default function SelectOptionsScreen() {
   const router = useRouter();
   const { farmerId } = useLocalSearchParams<{ farmerId?: string }>();
+  const { setFarmOptions } = useReadingSession();
+  const { user } = useAuth();
 
-  const [riceType, setRiceType] = useState<string | null>(null);
+  const [riceType, setRiceType] = useState<'hybrid' | 'inbred' | ''>('');
   const [soilType, setSoilType] = useState('');
   const [season, setSeason] = useState('');
 
-  // ✅ only these 3 are required now
   const allSelected = riceType && soilType && season;
 
-  const handleProceed = () => {
+  useFocusEffect(
+    useCallback(() => {
+      let cancelled = false;
+
+      (async () => {
+        try {
+          await ensureEsp32Reachable({ timeoutMs: 2000 });
+        } catch (e: any) {
+          if (cancelled) return;
+          Alert.alert('Not Connected', e?.message || `Please connect to "${ESP_SSID}" first.`);
+          router.replace({
+            pathname: '/(guest/tabs/connect-instructions' as const,
+            params: { farmerId: String(farmerId ?? '') },
+          });
+        }
+      })();
+
+      return () => {
+        cancelled = true;
+      };
+    }, [router, farmerId])
+  );
+
+  const normalizeSoilClass = (v: string): 'light' | 'medHeavy' => {
+    const s = String(v || '').toLowerCase();
+    if (s.includes('light')) return 'light';
+    return 'medHeavy';
+  };
+
+  const normalizeSeason = (v: string): 'wet' | 'dry' => {
+    const s = String(v || '').toLowerCase();
+    if (s.includes('wet')) return 'wet';
+    return 'dry';
+  };
+
+  const handleProceed = async () => {
+    try {
+      await ensureEsp32Reachable({ timeoutMs: 2500 });
+    } catch (e: any) {
+      Alert.alert('Connection Required', e?.message || `Please connect to "${ESP_SSID}" then try again.`);
+      return;
+    }
+
+    if (!riceType || !soilType || !season) {
+      Alert.alert('Incomplete', 'Palihug pili-a tanan (rice type, soil type, season).');
+      return;
+    }
+
+    await setFarmOptions({
+      variety: riceType as 'hybrid' | 'inbred',
+      soilClass: normalizeSoilClass(soilType),
+      season: normalizeSeason(season),
+      farmerId: String(farmerId ?? ''),
+      farmerName: (user?.name || user?.username || '').trim(),
+    });
+
     router.push({
       pathname: '/guest/screens/sensor-reading',
       params: { farmerId: String(farmerId ?? '') },
@@ -32,9 +95,15 @@ export default function SelectOptionsScreen() {
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()}>
+        <TouchableOpacity
+          onPress={() =>
+            router.replace({
+              pathname: '/guest/tabs/connect-instructions' as const,
+              params: { farmerId: String(farmerId ?? '') },
+            })
+          }
+        >
           <Ionicons name="arrow-back" size={24} color="#fff" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Farm Details</Text>
@@ -42,41 +111,35 @@ export default function SelectOptionsScreen() {
 
       <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
         <Text style={styles.description}>
-          Pumili ng mga impormasyon tungkol sa iyong sakahan upang makabuo ng tamang rekomendasyon.
+          Pagpili og impormasyon bahin sa imong umahan aron makabuhat og tama nga rekomendasyon.
         </Text>
 
-        {/* URI NG PALAY (HYBRID ONLY) */}
         <View style={styles.card}>
           <Text style={styles.cardTitle}>🌾 Klase sa Humay</Text>
           <View style={styles.optionsRow}>
-            {['Hybrid'].map((type) => {
-              const selected = riceType === type.toLowerCase();
+            {(['Hybrid', 'Inbred'] as const).map((type) => {
+              const val = type.toLowerCase() as 'hybrid' | 'inbred';
+              const selected = riceType === val;
               return (
                 <TouchableOpacity
                   key={type}
                   style={[styles.chip, selected && styles.chipSelected]}
-                  onPress={() => setRiceType(type.toLowerCase())}
+                  onPress={() => setRiceType(val)}
                 >
-                  <Text style={[styles.chipText, selected && styles.chipTextSelected]}>
-                    {type}
-                  </Text>
+                  <Text style={[styles.chipText, selected && styles.chipTextSelected]}>{type}</Text>
                 </TouchableOpacity>
               );
             })}
           </View>
         </View>
 
-        {/* URI NG LUPA */}
         <View style={styles.card}>
           <Text style={styles.cardTitle}>🧱 Klase sa Yuta</Text>
           <View style={[styles.pickerWrapper, soilType !== '' && styles.pickerSelected]}>
             <Picker
               selectedValue={soilType}
               onValueChange={setSoilType}
-              style={[
-                Platform.OS === 'android' ? styles.picker : {},
-                soilType !== '' && styles.selectedPickerText,
-              ]}
+              style={[Platform.OS === 'android' ? styles.picker : undefined]}
             >
               <Picker.Item label="Pumili..." value="" />
               <Picker.Item label="Light Soils" value="light soils" />
@@ -85,17 +148,13 @@ export default function SelectOptionsScreen() {
           </View>
         </View>
 
-        {/* PANAHON */}
         <View style={styles.card}>
           <Text style={styles.cardTitle}>⛅ Panahon sa Pagtanom</Text>
           <View style={[styles.pickerWrapper, season !== '' && styles.pickerSelected]}>
             <Picker
               selectedValue={season}
               onValueChange={setSeason}
-              style={[
-                Platform.OS === 'android' ? styles.picker : {},
-                season !== '' && styles.selectedPickerText,
-              ]}
+              style={[Platform.OS === 'android' ? styles.picker : undefined]}
             >
               <Picker.Item label="Pumili..." value="" />
               <Picker.Item label="Wet Season" value="wet season" />
@@ -107,25 +166,20 @@ export default function SelectOptionsScreen() {
         <View style={{ height: 100 }} />
       </ScrollView>
 
-      {/* Proceed Button */}
       <TouchableOpacity
         style={[styles.proceedButton, !allSelected && styles.disabledButton]}
         disabled={!allSelected}
         onPress={handleProceed}
       >
         <Ionicons name="arrow-forward-circle" size={20} color="#fff" />
-        <Text style={styles.proceedText}> Magpadayun</Text>
+        <Text style={styles.proceedText}>Magpadayun</Text>
       </TouchableOpacity>
     </SafeAreaView>
   );
 }
 
-// Styles unchanged
 const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: '#f5fff5',
-  },
+  safeArea: { flex: 1, backgroundColor: '#f5fff5' },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -143,10 +197,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginRight: 30,
   },
-  scrollContent: {
-    padding: 24,
-    paddingBottom: 120,
-  },
+  scrollContent: { padding: 24, paddingBottom: 120 },
   description: {
     fontSize: 14,
     color: '#444',
@@ -168,17 +219,8 @@ const styles = StyleSheet.create({
     shadowRadius: 4,
     elevation: 2,
   },
-  cardTitle: {
-    fontSize: 15,
-    color: '#2e7d32',
-    marginBottom: 11,
-    fontWeight: '600',
-  },
-  optionsRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
-  },
+  cardTitle: { fontSize: 15, color: '#2e7d32', marginBottom: 11, fontWeight: '600' },
+  optionsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
   chip: {
     borderWidth: 1.5,
     borderColor: '#2e7d32',
@@ -187,18 +229,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     backgroundColor: '#fff',
   },
-  chipSelected: {
-    backgroundColor: '#a5d6a7',
-    borderColor: '#1b5e20',
-  },
-  chipText: {
-    color: '#2e7d32',
-    fontWeight: '500',
-  },
-  chipTextSelected: {
-    color: '#1b5e20',
-    fontWeight: '700',
-  },
+  chipSelected: { backgroundColor: '#a5d6a7', borderColor: '#1b5e20' },
+  chipText: { color: '#2e7d32', fontWeight: '500' },
+  chipTextSelected: { color: '#1b5e20', fontWeight: '700' },
   pickerWrapper: {
     borderWidth: 1.3,
     borderColor: '#2e7d32',
@@ -208,15 +241,9 @@ const styles = StyleSheet.create({
     height: 50,
     justifyContent: 'center',
   },
-  pickerSelected: {
-    backgroundColor: '#d9f7dc',
-    borderColor: '#1b5e20',
-  },
-  picker: {},
-  selectedPickerText: {
-    color: '#1b5e20',
-    fontWeight: 'bold',
-  },
+  pickerSelected: { backgroundColor: '#d9f7dc', borderColor: '#1b5e20' },
+  picker: { height: 50, width: '100%' },
+
   proceedButton: {
     position: 'absolute',
     bottom: Platform.OS === 'ios' ? 90 : 70,
@@ -229,14 +256,8 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     elevation: 5,
+    gap: 8,
   },
-  disabledButton: {
-    backgroundColor: '#aaa',
-  },
-  proceedText: {
-    color: '#fff',
-    fontSize: 17,
-    fontWeight: '600',
-    marginLeft: 5,
-  },
+  proceedText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
+  disabledButton: { backgroundColor: '#aaa' },
 });

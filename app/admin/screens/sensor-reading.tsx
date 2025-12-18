@@ -1,3 +1,4 @@
+// app/(admin)/screens/sensor-reading.tsx
 import React, { useEffect, useCallback, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -46,6 +47,7 @@ const MIN_READING_DURATION_MS = 3500;
 
 type Nutrient = 'N' | 'P' | 'K';
 
+// ✅ FINAL Table 4.5 thresholds (same as recommendation)
 const THRESH = {
   N: { L: 110, M: 145 },
   P: { L: 315, M: 345 },
@@ -74,6 +76,7 @@ function isValidNpk(data: any): data is NpkJson {
   if (typeof n !== 'number' || typeof p !== 'number' || typeof k !== 'number') return false;
   if (!Number.isFinite(n) || !Number.isFinite(p) || !Number.isFinite(k)) return false;
 
+  // Reject "not inserted / failed poll"
   if (n === 0 && p === 0 && k === 0) return false;
 
   return true;
@@ -81,7 +84,13 @@ function isValidNpk(data: any): data is NpkJson {
 
 export default function AdminSensorReadingScreen() {
   const router = useRouter();
-  const { farmerId } = useLocalSearchParams<{ farmerId?: string }>();
+
+  // ✅ IMPORTANT: admin must receive selected farmerName from params
+  const { farmerId, farmerName: farmerNameParam } = useLocalSearchParams<{
+    farmerId?: string;
+    farmerName?: string;
+  }>();
+
   const { setLatestSensorData } = useData();
   const { token, user } = useAuth();
   const { setFromParams } = useReadingSession();
@@ -110,6 +119,7 @@ export default function AdminSensorReadingScreen() {
     };
   }, []);
 
+  // ✅ HARD-GATE: must be reachable before reading
   const ensureConnected = useCallback(async () => {
     await autoConnectToESP32();
   }, []);
@@ -188,7 +198,9 @@ export default function AdminSensorReadingScreen() {
 
       setLatestSensorData(finalResult);
 
-      const farmerName = (user?.name || user?.username || '').trim();
+      // ✅ ADMIN: farmerName must be the selected farmer (params)
+      const selectedFarmerName =
+        String(farmerNameParam ?? '').trim() || String(user?.name || user?.username || '').trim();
 
       // local cache (admin version key)
       try {
@@ -200,7 +212,7 @@ export default function AdminSensorReadingScreen() {
             p: avgP,
             k: avgK,
             ph: Number.isFinite(avgPH) ? avgPH : undefined,
-            farmerName,
+            farmerName: selectedFarmerName, // ✅ cache selected farmer
           };
           await AsyncStorage.setItem(key, JSON.stringify(payload));
         }
@@ -208,6 +220,7 @@ export default function AdminSensorReadingScreen() {
         console.warn('[AdminSensorReading] failed to cache admin last reading:', e);
       }
 
+      // ✅ put into ReadingSession (recommendation reads this)
       try {
         await setFromParams({
           n: avgN,
@@ -215,7 +228,7 @@ export default function AdminSensorReadingScreen() {
           k: avgK,
           ph: Number.isFinite(avgPH) ? avgPH : undefined,
           farmerId: typeof farmerId === 'string' ? farmerId : undefined,
-          farmerName,
+          farmerName: selectedFarmerName, // ✅ IMPORTANT FIX (same concept as stakeholder)
           ts: tsNum,
         });
       } catch (e) {
@@ -243,10 +256,12 @@ export default function AdminSensorReadingScreen() {
       await new Promise((r) => setTimeout(r, 600));
       if (abortRef.current.cancelled) return;
 
-      router.push({
+      // ✅ same navigation behavior as stakeholder (replace)
+      router.replace({
         pathname: '/admin/screens/reconnect-prompt',
         params: {
           farmerId: String(farmerId ?? ''),
+          farmerName: selectedFarmerName, // ✅ pass forward
           n: String(avgN),
           p: String(avgP),
           k: String(avgK),
@@ -254,7 +269,17 @@ export default function AdminSensorReadingScreen() {
         },
       });
     },
-    [farmerId, router, setFromParams, setLatestSensorData, token, user?.name, user?.username, user?._id]
+    [
+      farmerId,
+      farmerNameParam,
+      router,
+      setFromParams,
+      setLatestSensorData,
+      token,
+      user?.name,
+      user?.username,
+      user?._id,
+    ]
   );
 
   const handleReadNextStep = useCallback(async () => {

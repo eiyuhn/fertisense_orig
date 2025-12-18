@@ -73,6 +73,12 @@ export default function AdminSelectOptionsScreen() {
       return;
     }
 
+    // ✅ MATCH stakeholder: block if incomplete
+    if (!riceType || !soilType || !season) {
+      Alert.alert('Incomplete', 'Please select all (rice type, soil type, season).');
+      return;
+    }
+
     await setFarmOptions({
       variety: riceType as 'hybrid' | 'inbred',
       soilClass: normalizeSoilClass(soilType),

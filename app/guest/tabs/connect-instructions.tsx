@@ -1,249 +1,172 @@
 // app/guest/screens/connect-instructions.tsx
-
-import React, { useState } from 'react';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter, useLocalSearchParams } from 'expo-router';
+import React, { useState } from 'react';
 import {
-  ActivityIndicator,
-  Alert,
-  Image,
   ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
+  Image,
+  ActivityIndicator,
+  Alert,
 } from 'react-native';
-// Ensure this path is correct based on your project structure
-import { autoConnectToESP32, readNpkFromESP32 } from '../../../src/esp32'; 
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
-// 🔒 Your images are in ROOT: /assets/images (not app/assets)
-const logo      = require('../../../assets/images/fertisense-logo.png');
-const icPower  = require('../../../assets/images/power.png');
-const icWifi   = require('../../../assets/images/connect-wifi.png');
-const icSensor = require('../../../assets/images/sensor.png');
-const icRice   = require('../../../assets/images/rice.png');
-const icCheck  = require('../../../assets/images/check.png');
+import { autoConnectToESP32, readNpkFromESP32, ESP_SSID } from '../../../src/esp32';
 
-const GREEN = '#2e7d32';
-
-export default function ConnectInstructions() {
+export default function ConnectInstructionsScreen() {
   const router = useRouter();
   const { farmerId } = useLocalSearchParams<{ farmerId?: string }>();
   const [busy, setBusy] = useState(false);
+  const [statusMessage, setStatusMessage] = useState('');
+  const insets = useSafeAreaInsets();
 
-  const onConnect = async () => {
+  async function handleConnect() {
+    if (busy) return;
+
     setBusy(true);
+    setStatusMessage(`Connecting to ${ESP_SSID}...`);
+
     try {
-      // 1) Scan nearby networks and connect to ESP32 AP
       await autoConnectToESP32();
 
-      // 2) Quick sanity fetch to ensure routing goes to 192.168.4.1
-      //    (If your ESP returns text, this still works.)
-      await readNpkFromESP32();
+      // ✅ optional sanity read (keep this for guest)
+      try {
+        await readNpkFromESP32();
+      } catch {
+        // ignore if endpoint is not reachable yet; connection may still be OK
+      }
 
-      // 3) Navigate to your next screen
+      setStatusMessage('Connected to ESP32 successfully!');
+      await new Promise((r) => setTimeout(r, 400));
+
       router.push({
         pathname: '/guest/screens/select-options' as const,
         params: { farmerId: String(farmerId ?? '') },
       });
     } catch (err: any) {
+      setStatusMessage('');
       Alert.alert(
-        'Hindi makakonekta',
-        err?.message ??
-          'Tiyaking nakakonekta sa Wi-Fi “ESP32-NPK”, naka-ON ang Location (Android), at subukan muli.'
+        'Connection Error',
+        err?.message ||
+          `Not connected to "${ESP_SSID}". Please connect to the ESP32 Wi-Fi first, then press Connect.`
       );
     } finally {
       setBusy(false);
     }
-  };
-
-  const handleBack = () => {
-    if (router.canGoBack()) router.back();
-    // ✅ FIX: Guest users should navigate to guest home, not admin home.
-    else router.push('/guest/tabs/guest-home'); 
-  };
+  }
 
   return (
-    <ScrollView contentContainerStyle={styles.container} style={{ backgroundColor: '#fff' }}>
-      {/* Back */}
-      <TouchableOpacity style={styles.backBtn} onPress={handleBack} activeOpacity={0.8}>
-        <Ionicons name="arrow-back" size={22} color="#333" />
-      </TouchableOpacity>
-
-      {/* Brand */}
-      <Image source={logo} style={styles.logo} resizeMode="contain" />
-      <Text style={styles.title}>Connect to Device</Text>
-      <Text style={styles.date}>
-        {new Date().toLocaleDateString('en-PH', { year: 'numeric', month: 'long', day: 'numeric' })}
-      </Text>
-
-      {/* Instructions */}
-      {/* Instructions */}
-<View style={styles.card}>
-  <Text style={styles.cardIntro}>
-    Ayha makita ang datos, ikonekta una ang device sa imong cellphone.
-  </Text>
-
-  <View style={styles.stepRow}>
-    <View style={styles.iconWrap}>
-      <Image source={icPower} style={styles.icon} />
-    </View>
-    <Text style={styles.stepText}>
-      I-on ang imong sensor device.
-    </Text>
-  </View>
-
-  <View style={styles.stepRow}>
-    <View style={styles.iconWrap}>
-      <Image source={icWifi} style={styles.icon} />
-    </View>
-    <Text style={styles.stepText}>
-      I-on ang Wi-Fi ug pangitaa ang <Text style={styles.bold}>“ESP32-NPK”</Text>. 
-    </Text>
-  </View>
-
-  <View style={styles.stepRow}>
-    <View style={styles.iconWrap}>
-      <Image source={icSensor} style={styles.icon} />
-    </View>
-    <Text style={styles.stepText}>
-      Pinduta ang <Text style={styles.bold}>“Connect”</Text> aron makakonek sa sensor.
-    </Text>
-  </View>
-
-  <View style={styles.stepRow}>
-    <View style={styles.iconWrap}>
-      <Image source={icRice} style={styles.icon} />
-    </View>
-    <Text style={styles.stepText}>
-      Pilia kung unsang klase sa humay ang imong itanom.
-    </Text>
-  </View>
-
-  <View style={styles.stepRow}>
-    <View style={styles.iconWrap}>
-      <Image source={icCheck} style={styles.iconTall} />
-    </View>
-    <Text style={styles.stepText}>
-      Hulata nga makakonek ug makita ang <Text style={styles.bold}>“Successful”</Text> nga status.
-    </Text>
-  </View>
-</View>
-
-
-      {/* CTA */}
-      <TouchableOpacity
-        style={[styles.cta, busy && { opacity: 0.9 }]}
-        onPress={onConnect}
-        disabled={busy}
-        activeOpacity={0.9}
+    <SafeAreaView style={styles.safe} edges={['top', 'left', 'right', 'bottom']}>
+      <ScrollView
+        style={styles.container}
+        contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + 40 }]}
       >
-        {busy ? <ActivityIndicator color="#fff" /> : <Text style={styles.ctaText}>Connect</Text>}
-      </TouchableOpacity>
-    </ScrollView>
+        <Image
+          source={require('../../../assets/images/fertisense-logo.png')}
+          style={styles.logo}
+          resizeMode="contain"
+        />
+
+        <Text style={styles.title}>Connect to Device</Text>
+
+        <View style={styles.card}>
+          <Text style={styles.lead}>
+            Ayha makita ang datos, ikonekta una ang device sa imong cellphone.
+          </Text>
+
+          <InstructionRow icon="power" text="I-on ang imong sensor device." />
+          <InstructionRow icon="wifi" text={`I-on ang Wi-Fi ug pangitaa ang "${ESP_SSID}".`} />
+          <InstructionRow icon="swap-horizontal" text="Pinduta ang ‘Connect’ aron makakonek sa sensor." />
+          <InstructionRow icon="leaf" text="Pilia ang options sa humay (hybrid/inbred, yuta, season)." />
+          <InstructionRow
+            icon="analytics"
+            text="Human sa pagbasa, ang NPK i-classify as LOW/MEDIUM/HIGH para sa recommendation."
+          />
+
+          <TouchableOpacity
+            style={[styles.cta, busy && styles.ctaDisabled]}
+            onPress={handleConnect}
+            disabled={busy}
+            activeOpacity={0.85}
+          >
+            {busy ? (
+              <>
+                <ActivityIndicator color="#fff" style={{ marginRight: 8 }} />
+                <Text style={styles.ctaText}>Connecting…</Text>
+              </>
+            ) : (
+              <>
+                <Ionicons name="wifi" size={20} color="#fff" style={{ marginRight: 6 }} />
+                <Text style={styles.ctaText}>Connect</Text>
+              </>
+            )}
+          </TouchableOpacity>
+
+          {statusMessage !== '' && <Text style={styles.statusText}>{statusMessage}</Text>}
+        </View>
+      </ScrollView>
+    </SafeAreaView>
   );
 }
 
+function InstructionRow({ icon, text }: { icon: keyof typeof Ionicons.glyphMap; text: string }) {
+  return (
+    <View style={rowStyles.row}>
+      <View style={rowStyles.bullet}>
+        <Ionicons name={icon} size={20} color="#2e7d32" />
+      </View>
+      <Text style={rowStyles.text}>{text}</Text>
+    </View>
+  );
+}
+
+const GREEN = '#2e7d32';
+
 const styles = StyleSheet.create({
-  container: {
-    padding: 24,
-    paddingBottom: 36,
-    alignItems: 'center',
-  },
-
-  backBtn: {
-    position: 'absolute',
-    top: 18,
-    left: 18,
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: '#f3f3f3',
-    alignItems: 'center',
-    justifyContent: 'center',
-    elevation: 2,
-    zIndex: 10,
-  },
-
-  logo: {
-    width: 110,
-    height: 140,
-    marginTop: 12,
-    marginBottom: 4,
-  },
-
-  title: {
-    fontSize: 20,
-    fontWeight: '800',
-    color: GREEN,
-    marginBottom: 2,
-    letterSpacing: 0.2,
-  },
-
-  date: {
-    fontSize: 12.5,
-    color: '#6d6d6d',
-    marginBottom: 14,
-  },
-
+  safe: { flex: 1, backgroundColor: '#ffffff' },
+  container: { flex: 1, backgroundColor: '#ffffff' },
+  content: { alignItems: 'center', paddingHorizontal: 20, paddingTop: 70 },
+  logo: { width: 120, height: 78, marginBottom: 10, marginTop: -40 },
+  title: { fontSize: 20, fontWeight: '700', color: GREEN, marginBottom: 16 },
   card: {
     width: '100%',
-    borderWidth: 1,
-    borderColor: '#cfe9d2',
-    backgroundColor: '#f6fbf7',
-    borderRadius: 14,
-    padding: 16,
-    marginTop: 6,
-    marginBottom: 20,
+    backgroundColor: '#f7fbf7',
+    borderRadius: 18,
+    borderWidth: 2,
+    borderColor: GREEN,
+    padding: 18,
+    marginBottom: 28,
   },
-
-  cardIntro: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: '#333',
-    textAlign: 'center',
-    marginBottom: 16,
-  },
-
-  stepRow: {
+  lead: { fontSize: 14, color: '#2b2b2b', lineHeight: 20, marginBottom: 14, textAlign: 'center' },
+  cta: {
+    marginTop: 10,
+    width: '100%',
+    backgroundColor: GREEN,
+    borderRadius: 999,
+    paddingVertical: 14,
     flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 10,
-    marginBottom: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+    elevation: 3,
   },
+  ctaDisabled: { backgroundColor: '#a5d6a7' },
+  ctaText: { color: '#ffffff', fontSize: 16, fontWeight: '700', letterSpacing: 0.2 },
+  statusText: { textAlign: 'center', color: GREEN, fontSize: 13, marginTop: 10 },
+});
 
-  iconWrap: {
-    width: 30,
+const rowStyles = StyleSheet.create({
+  row: { flexDirection: 'row', alignItems: 'center', marginBottom: 14 },
+  bullet: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
     alignItems: 'center',
     justifyContent: 'center',
-    marginTop: 1,
+    backgroundColor: '#e8f2e8',
+    marginRight: 10,
   },
-
-  icon: { width: 22, height: 22, resizeMode: 'contain' },
-  iconTall: { width: 24, height: 30, resizeMode: 'contain' },
-
-  stepText: {
-    flex: 1,
-    fontSize: 15,
-    color: '#434343',
-    lineHeight: 21,
-  },
-
-  bold: { fontWeight: '800' },
-
-  cta: {
-    backgroundColor: GREEN,
-    paddingVertical: 13,
-    paddingHorizontal: 100,
-    borderRadius: 999,
-    alignSelf: 'center',
-    elevation: 0,
-  },
-
-  ctaText: {
-    color: '#fff',
-    fontWeight: '800',
-    fontSize: 15.5,
-    letterSpacing: 0.2,
-  },
+  text: { flex: 1, fontSize: 14, color: '#333', lineHeight: 20 },
 });

@@ -1,4 +1,5 @@
 // app/(stakeholder)/screens/recommendation.tsx
+
 import React from 'react';
 import {
   View,
@@ -12,34 +13,32 @@ import {
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
-import NetInfo from '@react-native-community/netinfo';
+import NetInfo from '@react-native-community/netinfo'; 
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
-import * as FileSystem from 'expo-file-system';
-import * as FileSystemLegacy from 'expo-file-system/legacy';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { useAuth } from '../../../context/AuthContext';
 import { useFertilizer } from '../../../context/FertilizerContext';
-import { useReadingSession } from '../../../context/ReadingSessionContext';
+import { useReadingSession, type RiceVariety, type SoilClass, type Season } from '../../../context/ReadingSessionContext';
 
 import {
   addReading,
   addStandaloneReading,
-  getDaRecommendation,
+  getDaRecommendation, // optional: for npkClass logging only
   getPublicPrices,
   type DaRecommendResponse,
   type AdminPricesDoc,
 } from '../../../src/services';
 
-const SACK_WEIGHT_KG = 50;
 const ORGANIC_FERT_CODE = 'Organic Fertilizer';
 const ORGANIC_BAGS_PER_HA = 10;
+const BAG_KG = 50;
 
 type Nutrient = 'N' | 'P' | 'K';
 type Lmh = 'L' | 'M' | 'H';
 
-// ✅ FINAL Table 4.5 thresholds
+// ✅ FINAL Table 4.5 thresholds (your provided)
 const THRESH = {
   N: { L: 110, M: 145 },
   P: { L: 315, M: 345 },
@@ -75,6 +74,9 @@ function moneyFmt(v: number) {
 }
 function asArray<T = any>(arr: any): T[] {
   return Array.isArray(arr) ? (arr as T[]) : [];
+}
+function round2(x: number) {
+  return Math.round((Number(x || 0) + Number.EPSILON) * 100) / 100;
 }
 
 /** ✅ Fertilizer full names */
@@ -114,19 +116,12 @@ type LocalPlan = {
   id: string;
   title: string;
   label: string;
-  isDa?: boolean;
   isCheapest?: boolean;
   schedule: LocalSchedule;
   cost: LocalCost | null;
 };
 
-// DA nutrient requirement (kg/ha)
-const DA_RICE_HYBRID_REQ = {
-  N: { L: 120, M: 90, H: 60 },
-  P: { L: 70, M: 50, H: 20 },
-  K: { L: 70, M: 50, H: 30 },
-} as const;
-
+// ✅ mapping to your backend price keys (for COST only)
 const CODE_TO_PRICE_KEY: Record<string, string> = {
   '46-0-0': 'UREA_46_0_0',
   '18-46-0': 'DAP_18_46_0',
@@ -136,34 +131,13 @@ const CODE_TO_PRICE_KEY: Record<string, string> = {
   '21-0-0': 'AMMOSUL_21_0_0',
 };
 
-function round2(x: number) {
-  return Math.round((Number(x || 0) + Number.EPSILON) * 100) / 100;
-}
-
 function getItemByCode(prices: AdminPricesDoc | null, dashCode: string) {
   const key = CODE_TO_PRICE_KEY[String(dashCode)];
   if (!prices || !key) return null;
   return (prices as any)?.items?.[key] ?? null;
 }
 
-function nutrientKgPerBag(prices: AdminPricesDoc | null, dashCode: string) {
-  const it = getItemByCode(prices, dashCode);
-  if (!it) return null;
-
-  const bagKg = Number(it.bagKg || 50);
-  const pctN = Number(it.npk?.N || 0);
-  const pctP = Number(it.npk?.P || 0);
-  const pctK = Number(it.npk?.K || 0);
-
-  return {
-    bagKg,
-    N: bagKg * (pctN / 100),
-    P: bagKg * (pctP / 100),
-    K: bagKg * (pctK / 100),
-    pricePerBag: Number(it.pricePerBag || 0),
-  };
-}
-
+// ✅ Organic MUST be in organic column only
 function ensureOrganic(schedule: LocalSchedule, areaHa: number) {
   const area = Number(areaHa || 1);
   const want = round2(ORGANIC_BAGS_PER_HA * area);
@@ -205,159 +179,297 @@ function calcCost(schedule: LocalSchedule, prices: AdminPricesDoc | null): Local
   return { currency, rows, total };
 }
 
-function buildAltPlan(params: {
-  id: string;
-  label: string;
-  reqKgHa: { N: number; P: number; K: number };
-  prices: AdminPricesDoc | null;
-  areaHa?: number;
-  basalMix: Array<{ code: string; role: 'P' | 'K' | 'PK' }>;
-  nSourceCode: string;
-}): LocalPlan | null {
-  const area = Number(params.areaHa || 1);
-
-  const req = {
-    N: Number(params.reqKgHa.N || 0) * area,
-    P: Number(params.reqKgHa.P || 0) * area,
-    K: Number(params.reqKgHa.K || 0) * area,
-  };
-
-  const checkCodes = [...params.basalMix.map((b) => b.code), params.nSourceCode];
-  for (const c of checkCodes) {
-    const n = nutrientKgPerBag(params.prices, c);
-    if (!n) return null;
-  }
-
-  let supplied = { N: 0, P: 0, K: 0 };
-  const basal: LocalScheduleLine[] = [];
-
-  for (const b of params.basalMix) {
-    const per = nutrientKgPerBag(params.prices, b.code)!;
-
-    let bags = 0;
-    if (b.role === 'P') bags = req.P / (per.P || 1);
-    else if (b.role === 'K') bags = req.K / (per.K || 1);
-    else bags = Math.max(req.P / (per.P || 1), req.K / (per.K || 1));
-
-    bags = round2(bags);
-    if (!Number.isFinite(bags) || bags < 0 || bags > 30) return null;
-
-    basal.push({ code: b.code, bags });
-    supplied.N += bags * per.N;
-    supplied.P += bags * per.P;
-    supplied.K += bags * per.K;
-  }
-
-  const nPer = nutrientKgPerBag(params.prices, params.nSourceCode)!;
-  const remainingN = Math.max(0, req.N - supplied.N);
-  let nBagsTotal = remainingN / (nPer.N || 1);
-
-  if (!Number.isFinite(nBagsTotal) || nBagsTotal < 0) nBagsTotal = 0;
-  if (nBagsTotal > 60) return null;
-
-  const after30 = round2(nBagsTotal / 2);
-  const topdress = round2(nBagsTotal / 2);
-
-  let schedule: LocalSchedule = {
-    organic: [],
-    basal,
-    after30DAT: after30 > 0 ? [{ code: params.nSourceCode, bags: after30 }] : [],
-    topdress60DBH: topdress > 0 ? [{ code: params.nSourceCode, bags: topdress }] : [],
-  };
-
-  schedule = ensureOrganic(schedule, area);
-  const cost = calcCost(schedule, params.prices);
-
-  return { id: params.id, title: 'Fertilizer Plan', label: params.label, isDa: false, isCheapest: false, schedule, cost };
+function planHasRealFertilizer(plan: LocalPlan): boolean {
+  const s = plan?.schedule || {};
+  const all = [...asArray(s.basal), ...asArray(s.after30DAT), ...asArray(s.topdress60DBH)];
+  return all.some((x: any) => String(x?.code) !== ORGANIC_FERT_CODE && Number(x?.bags || 0) > 0);
 }
 
-function build3PlansFallback(args: {
-  resp: DaRecommendResponse | null;
-  prices: AdminPricesDoc | null;
+function markCheapestAmongReal(plans: LocalPlan[]) {
+  plans.forEach((p) => (p.isCheapest = false));
+  const real = plans.filter(planHasRealFertilizer);
+
+  real.sort((a, b) => {
+    const ta = Number(a?.cost?.total ?? Number.POSITIVE_INFINITY);
+    const tb = Number(b?.cost?.total ?? Number.POSITIVE_INFINITY);
+    return ta - tb;
+  });
+
+  if (real.length) {
+    const cheapestId = String(real[0].id);
+    const hit = plans.find((p) => String(p.id) === cheapestId);
+    if (hit) hit.isCheapest = true;
+  }
+}
+
+/**
+ * ✅ REQUIREMENTS TABLE
+ * Put your real DA table here later.
+ * Your confirmed values:
+ * - Hybrid light wet (LLL): 120-70-70
+ * - Inbred light wet (LLL): 100-60-60
+ */
+type ReqTable = Record<Nutrient, Record<Lmh, number>>;
+
+const REQ: Record<RiceVariety, Record<SoilClass, Record<Season, ReqTable>>> = {
+  hybrid: {
+    light: {
+      wet: {
+        N: { L: 120, M: 90, H: 60 },
+        P: { L: 70, M: 50, H: 30 },
+        K: { L: 70, M: 50, H: 30 },
+      },
+      dry: {
+        N: { L: 140, M: 110, H: 80 }, // placeholder
+        P: { L: 70, M: 50, H: 30 },
+        K: { L: 70, M: 50, H: 30 },
+      },
+    },
+    medHeavy: {
+      wet: {
+        N: { L: 110, M: 80, H: 50 }, // placeholder
+        P: { L: 70, M: 50, H: 30 },
+        K: { L: 70, M: 50, H: 30 },
+      },
+      dry: {
+        N: { L: 120, M: 90, H: 60 }, // placeholder
+        P: { L: 70, M: 50, H: 30 },
+        K: { L: 70, M: 50, H: 30 },
+      },
+    },
+  },
+
+  inbred: {
+    light: {
+      wet: {
+        // ✅ YOUR expected inbred light wet LLL => 100-60-60
+        N: { L: 100, M: 70, H: 40 },
+        P: { L: 60, M: 40, H: 20 },
+        K: { L: 60, M: 40, H: 20 },
+      },
+      dry: {
+        N: { L: 120, M: 90, H: 60 }, // placeholder
+        P: { L: 60, M: 40, H: 20 },
+        K: { L: 60, M: 40, H: 20 },
+      },
+    },
+    medHeavy: {
+      wet: {
+        N: { L: 90, M: 60, H: 30 }, // placeholder
+        P: { L: 60, M: 40, H: 20 },
+        K: { L: 60, M: 40, H: 20 },
+      },
+      dry: {
+        N: { L: 100, M: 70, H: 40 }, // placeholder
+        P: { L: 60, M: 40, H: 20 },
+        K: { L: 60, M: 40, H: 20 },
+      },
+    },
+  },
+};
+
+function getRequirementKgHa(args: {
+  variety: RiceVariety;
+  soilClass: SoilClass;
+  season: Season;
   nClass: Lmh;
   pClass: Lmh;
   kClass: Lmh;
-  areaHa?: number;
-}): LocalPlan[] {
-  const area = Number(args.areaHa || 1);
-
-  const reqKgHa = {
-    N: DA_RICE_HYBRID_REQ.N[args.nClass],
-    P: DA_RICE_HYBRID_REQ.P[args.pClass],
-    K: DA_RICE_HYBRID_REQ.K[args.kClass],
+}): { N: number; P: number; K: number } {
+  const t = REQ?.[args.variety]?.[args.soilClass]?.[args.season] ?? REQ.hybrid.light.wet;
+  return {
+    N: Number(t.N[args.nClass] ?? 0),
+    P: Number(t.P[args.pClass] ?? 0),
+    K: Number(t.K[args.kClass] ?? 0),
   };
+}
 
-  let daSchedule: LocalSchedule = {
+/**
+ * ✅ FRONTEND BAG SOLVER (your formula)
+ * bags = targetKg / (gradeDecimal * 50)
+ */
+const GRADE = {
+  '14-14-14': { N: 0.14, P: 0.14, K: 0.14 },
+  '16-20-0': { N: 0.16, P: 0.20, K: 0.0 },
+  '46-0-0': { N: 0.46, P: 0.0, K: 0.0 },
+  '18-46-0': { N: 0.18, P: 0.46, K: 0.0 },
+  '0-0-60': { N: 0.0, P: 0.0, K: 0.60 },
+  '21-0-0': { N: 0.21, P: 0.0, K: 0.0 },
+} as const;
+
+function bagsFor(targetKg: number, gradeDec: number) {
+  if (!gradeDec || gradeDec <= 0) return 0;
+  return targetKg / (gradeDec * BAG_KG);
+}
+
+function suppliedKg(bags: number, gradeDec: number) {
+  return bags * BAG_KG * gradeDec;
+}
+
+/**
+ * ✅ PLAN 1: Complete (14-14-14) for K, then Ammophos (16-20-0) for remaining P, then Urea (46-0-0) for remaining N
+ * This is exactly your Step A/B/C approach.
+ */
+function buildPlan_Complete_Ammophos_Urea(req: { N: number; P: number; K: number }, areaHa: number, prices: AdminPricesDoc | null): LocalPlan {
+  const area = Number(areaHa || 1);
+  const targetN = req.N * area;
+  const targetP = req.P * area;
+  const targetK = req.K * area;
+
+  // Step A: 14-14-14 for K
+  const b141414 = round2(bagsFor(targetK, GRADE['14-14-14'].K));
+  const nFrom141414 = suppliedKg(b141414, GRADE['14-14-14'].N);
+  const pFrom141414 = suppliedKg(b141414, GRADE['14-14-14'].P);
+
+  // Remaining targets
+  const remP = Math.max(0, targetP - pFrom141414);
+  const remN_afterA = Math.max(0, targetN - nFrom141414);
+
+  // Step B: 16-20-0 for remaining P
+  const b16200 = round2(remP <= 0 ? 0 : bagsFor(remP, GRADE['16-20-0'].P));
+  const nFrom16200 = suppliedKg(b16200, GRADE['16-20-0'].N);
+
+  // Step C: Urea for remaining N after credits
+  const remN_final = Math.max(0, remN_afterA - nFrom16200);
+  const bUreaTotal = round2(remN_final <= 0 ? 0 : bagsFor(remN_final, GRADE['46-0-0'].N));
+
+  const halfUrea = round2(bUreaTotal / 2);
+
+  let schedule: LocalSchedule = {
     organic: [],
-    basal: asArray((args.resp as any)?.schedule?.basal),
-    after30DAT: asArray((args.resp as any)?.schedule?.after30DAT),
-    topdress60DBH: asArray((args.resp as any)?.schedule?.topdress60DBH),
+    basal: [
+      ...(b141414 > 0 ? [{ code: '14-14-14', bags: b141414 }] : []),
+      ...(b16200 > 0 ? [{ code: '16-20-0', bags: b16200 }] : []),
+    ],
+    after30DAT: halfUrea > 0 ? [{ code: '46-0-0', bags: halfUrea }] : [],
+    topdress60DBH: halfUrea > 0 ? [{ code: '46-0-0', bags: halfUrea }] : [],
   };
 
-  daSchedule = ensureOrganic(daSchedule, area);
+  schedule = ensureOrganic(schedule, area);
+  const cost = calcCost(schedule, prices);
 
-  const daCost: LocalCost | null =
-    (args.resp as any)?.cost && typeof (args.resp as any).cost === 'object'
-      ? {
-          currency: String((args.resp as any)?.cost?.currency || (args.prices as any)?.currency || 'PHP'),
-          rows: Array.isArray((args.resp as any)?.cost?.rows) ? (args.resp as any).cost.rows : [],
-          total: Number((args.resp as any)?.cost?.total || 0),
-        }
-      : calcCost(daSchedule, args.prices);
-
-  const daPlan: LocalPlan = {
-    id: 'DA_RULE',
+  return {
+    id: 'PLAN_COMPLETE_AMMOPHOS_UREA',
     title: 'Fertilizer Plan',
-    label: 'DA Recommendation',
-    isDa: true,
-    isCheapest: false,
-    schedule: daSchedule,
-    cost: daCost,
+    label: 'Option (14-14-14 + 16-20-0 + Urea)',
+    schedule,
+    cost,
+  };
+}
+
+/**
+ * ✅ PLAN 2: DAP + MOP + Urea
+ * - MOP satisfies K
+ * - DAP satisfies P (and credits N)
+ * - Urea tops up remaining N (split)
+ */
+function buildPlan_DAP_MOP_UREA(req: { N: number; P: number; K: number }, areaHa: number, prices: AdminPricesDoc | null): LocalPlan {
+  const area = Number(areaHa || 1);
+  const targetN = req.N * area;
+  const targetP = req.P * area;
+  const targetK = req.K * area;
+
+  const bMop = round2(bagsFor(targetK, GRADE['0-0-60'].K));
+  const bDap = round2(bagsFor(targetP, GRADE['18-46-0'].P));
+  const nFromDap = suppliedKg(bDap, GRADE['18-46-0'].N);
+
+  const remN = Math.max(0, targetN - nFromDap);
+  const bUreaTotal = round2(remN <= 0 ? 0 : bagsFor(remN, GRADE['46-0-0'].N));
+  const halfUrea = round2(bUreaTotal / 2);
+
+  let schedule: LocalSchedule = {
+    organic: [],
+    basal: [
+      ...(bDap > 0 ? [{ code: '18-46-0', bags: bDap }] : []),
+      ...(bMop > 0 ? [{ code: '0-0-60', bags: bMop }] : []),
+    ],
+    after30DAT: halfUrea > 0 ? [{ code: '46-0-0', bags: halfUrea }] : [],
+    topdress60DBH: halfUrea > 0 ? [{ code: '46-0-0', bags: halfUrea }] : [],
   };
 
-  const altA = buildAltPlan({
-    id: 'ALT_DAP_MOP_UREA',
-    label: 'Alternative (DAP + MOP + Urea)',
-    reqKgHa,
-    prices: args.prices,
-    areaHa: area,
-    basalMix: [
-      { code: '18-46-0', role: 'P' },
-      { code: '0-0-60', role: 'K' },
+  schedule = ensureOrganic(schedule, area);
+  const cost = calcCost(schedule, prices);
+
+  return {
+    id: 'PLAN_DAP_MOP_UREA',
+    title: 'Fertilizer Plan',
+    label: 'Option (DAP + MOP + Urea)',
+    schedule,
+    cost,
+  };
+}
+
+/**
+ * ✅ PLAN 3: 16-20-0 + MOP + Ammosul
+ * - MOP satisfies K
+ * - 16-20-0 satisfies P (credits N)
+ * - Ammosul tops up remaining N (split)
+ */
+function buildPlan_16200_MOP_AMMOSUL(req: { N: number; P: number; K: number }, areaHa: number, prices: AdminPricesDoc | null): LocalPlan {
+  const area = Number(areaHa || 1);
+  const targetN = req.N * area;
+  const targetP = req.P * area;
+  const targetK = req.K * area;
+
+  const bMop = round2(bagsFor(targetK, GRADE['0-0-60'].K));
+  const b16200 = round2(bagsFor(targetP, GRADE['16-20-0'].P));
+  const nFrom16200 = suppliedKg(b16200, GRADE['16-20-0'].N);
+
+  const remN = Math.max(0, targetN - nFrom16200);
+  const bAmmTotal = round2(remN <= 0 ? 0 : bagsFor(remN, GRADE['21-0-0'].N));
+  const halfAmm = round2(bAmmTotal / 2);
+
+  let schedule: LocalSchedule = {
+    organic: [],
+    basal: [
+      ...(b16200 > 0 ? [{ code: '16-20-0', bags: b16200 }] : []),
+      ...(bMop > 0 ? [{ code: '0-0-60', bags: bMop }] : []),
     ],
-    nSourceCode: '46-0-0',
-  });
+    after30DAT: halfAmm > 0 ? [{ code: '21-0-0', bags: halfAmm }] : [],
+    topdress60DBH: halfAmm > 0 ? [{ code: '21-0-0', bags: halfAmm }] : [],
+  };
 
-  const altB = buildAltPlan({
-    id: 'ALT_16_20_0_MOP_AMMOSUL',
-    label: 'Alternative (16-20-0 + MOP + Ammosul)',
-    reqKgHa,
-    prices: args.prices,
-    areaHa: area,
-    basalMix: [
-      { code: '16-20-0', role: 'P' },
-      { code: '0-0-60', role: 'K' },
-    ],
-    nSourceCode: '21-0-0',
-  });
+  schedule = ensureOrganic(schedule, area);
+  const cost = calcCost(schedule, prices);
 
-  const raw = [daPlan, altA, altB].filter(Boolean) as LocalPlan[];
+  return {
+    id: 'PLAN_16200_MOP_AMMOSUL',
+    title: 'Fertilizer Plan',
+    label: 'Option (16-20-0 + MOP + Ammosul)',
+    schedule,
+    cost,
+  };
+}
 
-  raw.sort((a, b) => {
+function build3FrontendPlans(args: {
+  prices: AdminPricesDoc | null;
+  reqKgHa: { N: number; P: number; K: number };
+  areaHa: number;
+}): LocalPlan[] {
+  const p1 = buildPlan_Complete_Ammophos_Urea(args.reqKgHa, args.areaHa, args.prices);
+  const p2 = buildPlan_DAP_MOP_UREA(args.reqKgHa, args.areaHa, args.prices);
+  const p3 = buildPlan_16200_MOP_AMMOSUL(args.reqKgHa, args.areaHa, args.prices);
+
+  // Remove any “organic-only” (should not happen, but safety)
+  let plans = [p1, p2, p3].filter((p) => planHasRealFertilizer(p));
+
+  // Sort by cost if available (organic has null price and won’t affect)
+  plans.sort((a, b) => {
     const ta = a.cost?.total ?? Number.POSITIVE_INFINITY;
     const tb = b.cost?.total ?? Number.POSITIVE_INFINITY;
     return ta - tb;
   });
 
-  if (raw.length) raw[0].isCheapest = true;
-  return raw.slice(0, 3);
+  // Mark cheapest among real plans
+  const top3 = plans.slice(0, 3);
+  markCheapestAmongReal(top3);
+  return top3;
 }
 
 // ✅ uniform table sizing
 const STAGE_COL_W = 190;
 const COL_W = 130;
 
-// ✅ tiny moving indicator under the table (no text)
 function ScrollProgress({ progress01 }: { progress01: number }) {
   const p = Math.max(0, Math.min(1, Number(progress01 || 0)));
   return (
@@ -367,9 +479,6 @@ function ScrollProgress({ progress01 }: { progress01: number }) {
   );
 }
 
-/**
- * ✅ FIX: Hook is moved here (NOT inside plans.map)
- */
 function PlanTableCard({
   p,
   idx,
@@ -425,7 +534,6 @@ function PlanTableCard({
 
   const optionLabel = `Fertilization Recommendation Option ${idx + 1}`;
   const contentWidth = STAGE_COL_W + fertCodes.length * COL_W;
-
   const [progress01, setProgress01] = React.useState(0);
 
   return (
@@ -565,6 +673,12 @@ export default function RecommendationScreen() {
   const farmerId = session?.farmerId ?? '';
   const displayName = (user?.name || user?.username || session?.farmerName || '').trim();
 
+  // ✅ read user-selected options from session
+  const variety: RiceVariety = session?.variety ?? 'hybrid';
+  const soilClass: SoilClass = session?.soilClass ?? 'light';
+  const season: Season = session?.season ?? 'wet';
+  const areaHa = 1;
+
   const nValue = Number(session?.n ?? 0);
   const pValue = Number(session?.p ?? 0);
   const kValue = Number(session?.k ?? 0);
@@ -587,8 +701,13 @@ export default function RecommendationScreen() {
   const pClass = toLMH_SAFE(levelP);
   const kClass = toLMH_SAFE(levelK);
 
+  // ✅ nutrients needed changes with variety/soil/season
+  const neededKgHa = React.useMemo(() => {
+    return getRequirementKgHa({ variety, soilClass, season, nClass, pClass, kClass });
+  }, [variety, soilClass, season, nClass, pClass, kClass]);
+
   const [resp, setResp] = React.useState<DaRecommendResponse | null>(null);
-  const [plansState, setPlansState] = React.useState<any[]>([]);
+  const [plansState, setPlansState] = React.useState<LocalPlan[]>([]);
   const [loadingPlans, setLoadingPlans] = React.useState(false);
   const [selectedPlanId, setSelectedPlanId] = React.useState<string | null>(null);
 
@@ -597,48 +716,107 @@ export default function RecommendationScreen() {
   const lastLoadedSessionKeyRef = React.useRef<string>('');
   const inFlightRef = React.useRef(false);
 
+  const cropKey = variety === 'inbred' ? 'rice_inbred' : 'rice_hybrid';
+
   const persistLocalHistory = React.useCallback(
-    async (plansForHistory: any[]) => {
-      if (!user?._id) return;
-      try {
-        const userKey = `history:${user._id}`;
-        const date = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
-        const phStr = `${phValue.toFixed(1)} (${phStatus})`;
+  async (plansForHistory: LocalPlan[], selectedId?: string | null, respSnapshot?: any) => {
+    if (!user?._id) return;
 
-        const fertilizerPlans =
-          Array.isArray(plansForHistory) && plansForHistory.length
-            ? plansForHistory.map((p: any, idx: number) => ({
-                name: `Fertilization Recommendation Option ${idx + 1}${p.isCheapest ? ' • Cheapest' : ''}`,
-                cost: `${p?.cost?.currency || currency || 'PHP'} ${moneyFmt(Number(p?.cost?.total || 0))}`,
-                details: [], // keep light; your history screen uses schedule/cost
-              }))
-            : [];
+    try {
+      const userKey = `history:${user._id}`;
+      const date = new Date().toLocaleDateString('en-US', {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+      });
 
-        const newItem = {
-          id: `reading_${sessionTs || Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-          date,
-          ph: phStr,
-          n_value: nValue,
-          p_value: pValue,
-          k_value: kValue,
-          recommendationText: '',
-          englishText: '',
-          fertilizerPlans,
-        };
+      const phStr = `${phValue.toFixed(1)} (${phStatus})`;
 
-        const raw = await AsyncStorage.getItem(userKey);
-        const prev = raw ? JSON.parse(raw) : [];
-        await AsyncStorage.setItem(userKey, JSON.stringify([newItem, ...prev]));
-      } catch (e) {
-        console.warn('local history save warn:', e);
-      }
-    },
-    [user?._id, nValue, pValue, kValue, phValue, phStatus, currency, sessionTs]
-  );
+      // ✅ store a lightweight index list (names + costs) for compatibility
+      const fertilizerPlans =
+        Array.isArray(plansForHistory) && plansForHistory.length
+          ? plansForHistory.map((p: any, idx: number) => ({
+              name: `Fertilization Recommendation Option ${idx + 1}${p.isCheapest ? ' • Cheapest' : ''}`,
+              cost: `${p?.cost?.currency || currency || 'PHP'} ${moneyFmt(Number(p?.cost?.total || 0))}`,
+              details: [],
+            }))
+          : [];
+
+      // ✅ store the REAL schedules to be shown in History table
+      const plansSnapshot =
+        Array.isArray(plansForHistory) && plansForHistory.length
+          ? plansForHistory.map((p) => ({
+              id: String(p.id),
+              label: String(p.label || ''),
+              isCheapest: !!p.isCheapest,
+              schedule: p.schedule,
+              cost: p.cost,
+            }))
+          : [];
+
+      const npkClassValue = respSnapshot?.classified?.npkClass || `${nClass}${pClass}${kClass}`;
+
+      const newItem: any = {
+      id: `reading_${sessionTs || Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      date,
+      ph: phStr,
+      n_value: nValue,
+      p_value: pValue,
+      k_value: kValue,
+
+    
+      neededKgHa: {
+        N: Number(neededKgHa?.N || 0),
+        P: Number(neededKgHa?.P || 0),
+        K: Number(neededKgHa?.K || 0),
+      },
+
+      recommendationText: '',
+      englishText: '',
+
+      fertilizerPlans,
+
+  
+      plansSnapshot,
+      selectedPlanId: selectedId ? String(selectedId) : null,
+
+   
+      currency: currency || 'PHP',
+      npkClass: npkClassValue,
+      variety,
+      soilClass,
+      season,
+    };
+
+
+      const raw = await AsyncStorage.getItem(userKey);
+      const prev = raw ? JSON.parse(raw) : [];
+      await AsyncStorage.setItem(userKey, JSON.stringify([newItem, ...prev]));
+    } catch (e) {
+      console.warn('local history save warn:', e);
+    }
+  },
+  [
+    user?._id,
+    nValue,
+    pValue,
+    kValue,
+    phValue,
+    phStatus,
+    currency,
+    sessionTs,
+    variety,
+    soilClass,
+    season,
+    nClass,
+    pClass,
+    kClass,
+  ]
+);
 
   const saveReading = React.useCallback(
-    async (plansSnapshot: any[], selectedId?: string | null, respSnapshot?: any) => {
-      const saveKey = `${user?._id || 'nouser'}:${sessionTs || 'notime'}:${nValue}:${pValue}:${kValue}:${phValue}`;
+    async (plansSnapshot: LocalPlan[], selectedId?: string | null, respSnapshot?: any) => {
+      const saveKey = `${user?._id || 'nouser'}:${sessionTs || 'notime'}:${nValue}:${pValue}:${kValue}:${phValue}:${variety}:${soilClass}:${season}`;
       if (lastSavedKeyRef.current === saveKey) return;
       if (isSavingRef.current) return;
 
@@ -675,16 +853,17 @@ export default function RecommendationScreen() {
           daSchedule: chosen?.schedule ?? null,
           daCost: chosen?.cost ?? null,
           npkClass: respSnapshot?.classified?.npkClass || `${nClass}${pClass}${kClass}`,
+          variety,
+          soilClass,
+          season,
         };
 
         if (online && token) {
           if (farmerId && isObjectId(farmerId)) await addReading({ ...payload, farmerId }, token);
           else await addStandaloneReading(payload, token);
-        } else {
-          console.warn('Offline or no token: skipping cloud save.');
         }
 
-        await persistLocalHistory(plansSnapshot || []);
+        await persistLocalHistory(plansSnapshot || [], selectedId ?? null, respSnapshot);
         lastSavedKeyRef.current = saveKey;
       } catch (e: any) {
         console.error('save error:', e?.message || e);
@@ -693,61 +872,37 @@ export default function RecommendationScreen() {
         isSavingRef.current = false;
       }
     },
-    [user?._id, sessionTs, nValue, pValue, kValue, phValue, token, farmerId, currency, persistLocalHistory, nClass, pClass, kClass]
+    [user?._id, sessionTs, nValue, pValue, kValue, phValue, token, farmerId, currency, persistLocalHistory, nClass, pClass, kClass, variety, soilClass, season]
   );
 
   const fetchAndBuildPlans = React.useCallback(async () => {
     setLoadingPlans(true);
     try {
+      // ✅ We only fetch prices for COST and fetch DA only for optional logging (npkClass etc)
       const [r, pd] = await Promise.all([
-        token
-          ? getDaRecommendation(token, { crop: 'rice_hybrid', nClass, pClass, kClass, areaHa: 1 }).catch(() => null)
-          : Promise.resolve(null),
+        token ? getDaRecommendation(token, { crop: cropKey, nClass, pClass, kClass, areaHa }).catch(() => null) : Promise.resolve(null),
         getPublicPrices().catch(() => null),
       ]);
 
       setResp(r as any);
 
-      const serverPlans = Array.isArray((r as any)?.plans) ? (r as any).plans : null;
+      // ✅ Build plans using FRONTEND math
+      const localPlans = build3FrontendPlans({
+        prices: pd as any,
+        reqKgHa: neededKgHa,
+        areaHa,
+      });
 
-      let snapshotPlans: any[] = [];
-      if (serverPlans && serverPlans.length >= 3) {
-        const sorted = [...serverPlans].sort((a: any, b: any) => {
-          const ta = Number(a?.cost?.total ?? Number.POSITIVE_INFINITY);
-          const tb = Number(b?.cost?.total ?? Number.POSITIVE_INFINITY);
-          return ta - tb;
-        });
+      setPlansState(localPlans);
 
-        snapshotPlans = sorted
-          .map((p: any) => {
-            const s = p?.schedule || {};
-            const schedule: LocalSchedule = {
-              organic: asArray(s.organic),
-              basal: asArray(s.basal),
-              after30DAT: asArray(s.after30DAT),
-              topdress60DBH: asArray(s.topdress60DBH),
-            };
-            const fixed = ensureOrganic(schedule, 1);
-            return { ...p, schedule: fixed };
-          })
-          .slice(0, 3);
-
-        snapshotPlans.forEach((p: any) => (p.isCheapest = false));
-        if (snapshotPlans.length) snapshotPlans[0].isCheapest = true;
-      } else {
-        snapshotPlans = build3PlansFallback({ resp: r as any, prices: pd as any, nClass, pClass, kClass, areaHa: 1 });
-      }
-
-      setPlansState(snapshotPlans);
-
-      const firstId = snapshotPlans?.[0]?.id ? String(snapshotPlans[0].id) : null;
+      const firstId = localPlans?.[0]?.id ? String(localPlans[0].id) : null;
       setSelectedPlanId((prev) => {
-        if (prev && snapshotPlans.some((p: any) => String(p.id) === String(prev))) return prev;
+        if (prev && localPlans.some((p: any) => String(p.id) === String(prev))) return prev;
         return firstId;
       });
 
-      await saveReading(snapshotPlans, firstId, r);
-      return snapshotPlans;
+      await saveReading(localPlans, firstId, r);
+      return localPlans;
     } catch (e: any) {
       console.error('fetch/build plans error:', e?.message || e);
       setPlansState([]);
@@ -755,7 +910,7 @@ export default function RecommendationScreen() {
     } finally {
       setLoadingPlans(false);
     }
-  }, [token, nClass, pClass, kClass, saveReading]);
+  }, [token, cropKey, nClass, pClass, kClass, areaHa, neededKgHa, saveReading]);
 
   useFocusEffect(
     React.useCallback(() => {
@@ -763,7 +918,7 @@ export default function RecommendationScreen() {
         if (sessionInvalid) return;
         if (inFlightRef.current) return;
 
-        const sessionKey = `${user?._id || 'nouser'}:${sessionTs}:${nValue}:${pValue}:${kValue}:${phValue}:${nClass}${pClass}${kClass}`;
+        const sessionKey = `${user?._id || 'nouser'}:${sessionTs}:${nValue}:${pValue}:${kValue}:${phValue}:${nClass}${pClass}${kClass}:${variety}:${soilClass}:${season}`;
         if (lastLoadedSessionKeyRef.current === sessionKey) return;
 
         inFlightRef.current = true;
@@ -777,7 +932,7 @@ export default function RecommendationScreen() {
       })();
 
       return () => {};
-    }, [fetchAndBuildPlans, sessionInvalid, user?._id, sessionTs, nValue, pValue, kValue, phValue, nClass, pClass, kClass])
+    }, [fetchAndBuildPlans, sessionInvalid, user?._id, sessionTs, nValue, pValue, kValue, phValue, nClass, pClass, kClass, variety, soilClass, season])
   );
 
   const plans = plansState;
@@ -791,188 +946,165 @@ export default function RecommendationScreen() {
   const [pdfBusy, setPdfBusy] = React.useState(false);
 
   const handleSavePDF = React.useCallback(async () => {
-  if (pdfBusy) return;
-  if (!selectedPlan) {
-    Alert.alert('No Plan', 'No fertilizer plan available yet.');
-    return;
-  }
-
-  setPdfBusy(true);
-
-  const today = new Date();
-  const ymd = today.toISOString().slice(0, 10);
-  const filename = `STAKEHOLDER_READING_${ymd.replace(/-/g, '')}.pdf`;
-
-  const plan = selectedPlan as any;
-  const cur = plan?.cost?.currency || currency || 'PHP';
-
-  const fixedSchedule = ensureOrganic(
-    {
-      organic: asArray(plan?.schedule?.organic),
-      basal: asArray(plan?.schedule?.basal),
-      after30DAT: asArray(plan?.schedule?.after30DAT),
-      topdress60DBH: asArray(plan?.schedule?.topdress60DBH),
-    },
-    1
-  );
-
-  const fertCodes = Array.from(
-    new Set([
-      ...asArray(fixedSchedule.organic).map((x: any) => String(x.code)),
-      ...asArray(fixedSchedule.basal).map((x: any) => String(x.code)),
-      ...asArray(fixedSchedule.after30DAT).map((x: any) => String(x.code)),
-      ...asArray(fixedSchedule.topdress60DBH).map((x: any) => String(x.code)),
-    ])
-  );
-
-  const getBags = (stageArr: any[] | undefined, code: string) => {
-    const a = asArray(stageArr);
-    const it = a.find((x: any) => String(x.code) === String(code));
-    return it ? Number(it.bags || 0) : 0;
-  };
-
-  const headerCols = fertCodes
-    .map((c) => {
-      const nm = (FERTILIZER_NAMES[c] || 'Fertilizer').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      const cc = String(c).replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      return `<th style="text-align:center;">
-                <div class="code">${cc}</div>
-                <div class="name">${nm}</div>
-              </th>`;
-    })
-    .join('');
-
-  const stageRow = (label: string, stageArr: any[] | undefined) => {
-    const cols = fertCodes.map((c) => `<td class="bags">${bagsFmt(getBags(stageArr, c))}</td>`).join('');
-    return `<tr><td>${label}</td>${cols}</tr>`;
-  };
-
-  const totalRow = () => {
-    const totalsByCode: Record<string, number> = {};
-    const add = (arr?: any[]) =>
-      asArray(arr).forEach((x: any) => {
-        const c = String(x.code);
-        totalsByCode[c] = (totalsByCode[c] || 0) + Number(x.bags || 0);
-      });
-
-    add(fixedSchedule.organic);
-    add(fixedSchedule.basal);
-    add(fixedSchedule.after30DAT);
-    add(fixedSchedule.topdress60DBH);
-
-    const cols = fertCodes
-      .map((c) => `<td class="bags"><b>${bagsFmt(totalsByCode[c] || 0)}</b></td>`)
-      .join('');
-    return `<tr><td><b>Total Bags</b></td>${cols}</tr>`;
-  };
-
-  const farmerLabel = (displayName || '(stakeholder account)').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-
-  const idx = Math.max(0, plans.findIndex((p: any) => String(p.id) === String(plan.id)));
-  const optionLabel = `Fertilization Recommendation Option ${idx + 1}`;
-
-  const html = `
-    <html>
-      <head>
-        <meta charset="utf-8" />
-        <style>
-          body { font-family: Arial, sans-serif; padding: 30px; }
-          h1 { color: #2e7d32; margin: 0 0 6px; }
-          h3 { margin: 18px 0 10px; }
-          .box { border:1px solid #ccc; padding:14px; border-radius:8px; background:#f8fff9; }
-          table { width:100%; border-collapse:collapse; table-layout: fixed; }
-          th, td { border:1px solid #ccc; padding:8px 10px; vertical-align:middle; }
-          th { background:#e8f5e9; }
-          .hdr { display:flex; justify-content:space-between; align-items:center; padding:10px 12px; background:#2e7d32; color:#fff; border-radius:6px 6px 0 0; }
-          .footer { margin-top: 28px; color:#777; text-align:center; font-size:12px; }
-          .code { font-weight:700; color:#1b5e20; white-space:nowrap; }
-          .name { font-weight:400; color:#2f3b30; font-size:11px; line-height:1.2; word-break:keep-all; hyphens:none; }
-          .bags { text-align:center; white-space:nowrap; }
-        </style>
-      </head>
-      <body>
-        <h1>🌱 Fertilizer Report</h1>
-        <p><b>📅 Date:</b> ${ymd}</p>
-        <p><b>👤 Farmer:</b> ${farmerLabel}</p>
-
-        <h3>📟 Reading Results</h3>
-        <div class="box">
-          <p><b>pH:</b> ${phValue.toFixed(1)} (${phStatus})</p>
-          <p><b>N:</b> ${levelN} &nbsp; <b>P:</b> ${levelP} &nbsp; <b>K:</b> ${levelK}</p>
-          <p><b>Class:</b> ${(resp as any)?.classified?.npkClass || `${nClass}${pClass}${kClass}`}</p>
-        </div>
-
-        <h3>📌 Fertilizer Plan</h3>
-        <div class="hdr">
-          <span>${optionLabel}${plan.isCheapest ? ' • Cheapest' : ''}</span>
-          <span>${cur} ${moneyFmt(Number(plan?.cost?.total || 0))}</span>
-        </div>
-
-        <table>
-          <tr>
-            <th style="text-align:left;">Stages</th>
-            ${headerCols}
-          </tr>
-          ${stageRow('Organic Fertilizer (14 - 30 days ayha sa pagtanom)', fixedSchedule.organic)}
-          ${stageRow('Sa Pagtanom', fixedSchedule.basal)}
-          ${stageRow('Pagkahuman sa ika 30 na adlaw', fixedSchedule.after30DAT)}
-          ${stageRow('Top Dress (60 days ayha sa pag harvest)', fixedSchedule.topdress60DBH)}
-          ${totalRow()}
-        </table>
-
-        <div class="footer">FertiSense • ${today.getFullYear()}</div>
-      </body>
-    </html>
-  `;
-
-  try {
-    const { uri } = await Print.printToFileAsync({ html });
-
-    if (!(await Sharing.isAvailableAsync())) {
-      Alert.alert('Sharing not available', `PDF created at:\n${uri}`);
+    if (pdfBusy) return;
+    if (!selectedPlan) {
+      Alert.alert('No Plan', 'No fertilizer plan available yet.');
       return;
     }
 
-    // ✅ Share directly from generated uri (no moveAsync / no documentDirectory)
-    await Sharing.shareAsync(uri, {
-      mimeType: 'application/pdf',
-      dialogTitle: 'Save / Share PDF',
-      UTI: 'com.adobe.pdf', // iOS safe, ignored on Android
-    });
-  } catch (err: any) {
-    console.error('PDF error:', err);
-    Alert.alert('PDF Error', err?.message ?? 'Could not generate PDF.');
-  } finally {
-    setPdfBusy(false);
-  }
-}, [
-  pdfBusy,
-  selectedPlan,
-  currency,
-  displayName,
-  phValue,
-  phStatus,
-  levelN,
-  levelP,
-  levelK,
-  resp,
-  nClass,
-  pClass,
-  kClass,
-  plans,
-]);
+    setPdfBusy(true);
 
+    const today = new Date();
+    const ymd = today.toISOString().slice(0, 10);
+
+    const plan = selectedPlan as any;
+    const cur = plan?.cost?.currency || currency || 'PHP';
+
+    const fixedSchedule = ensureOrganic(
+      {
+        organic: asArray(plan?.schedule?.organic),
+        basal: asArray(plan?.schedule?.basal),
+        after30DAT: asArray(plan?.schedule?.after30DAT),
+        topdress60DBH: asArray(plan?.schedule?.topdress60DBH),
+      },
+      1
+    );
+
+    const fertCodes = Array.from(
+      new Set([
+        ...asArray(fixedSchedule.organic).map((x: any) => String(x.code)),
+        ...asArray(fixedSchedule.basal).map((x: any) => String(x.code)),
+        ...asArray(fixedSchedule.after30DAT).map((x: any) => String(x.code)),
+        ...asArray(fixedSchedule.topdress60DBH).map((x: any) => String(x.code)),
+      ])
+    );
+
+    const getBags = (stageArr: any[] | undefined, code: string) => {
+      const a = asArray(stageArr);
+      const it = a.find((x: any) => String(x.code) === String(code));
+      return it ? Number(it.bags || 0) : 0;
+    };
+
+    const headerCols = fertCodes
+      .map((c) => {
+        const nm = (FERTILIZER_NAMES[c] || 'Fertilizer').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const cc = String(c).replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        return `<th style="text-align:center;">
+                  <div class="code">${cc}</div>
+                  <div class="name">${nm}</div>
+                </th>`;
+      })
+      .join('');
+
+    const stageRow = (label: string, stageArr: any[] | undefined) => {
+      const cols = fertCodes.map((c) => `<td class="bags">${bagsFmt(getBags(stageArr, c))}</td>`).join('');
+      return `<tr><td>${label}</td>${cols}</tr>`;
+    };
+
+    const totalRow = () => {
+      const totalsByCode: Record<string, number> = {};
+      const add = (arr?: any[]) =>
+        asArray(arr).forEach((x: any) => {
+          const c = String(x.code);
+          totalsByCode[c] = (totalsByCode[c] || 0) + Number(x.bags || 0);
+        });
+
+      add(fixedSchedule.organic);
+      add(fixedSchedule.basal);
+      add(fixedSchedule.after30DAT);
+      add(fixedSchedule.topdress60DBH);
+
+      const cols = fertCodes.map((c) => `<td class="bags"><b>${bagsFmt(totalsByCode[c] || 0)}</b></td>`).join('');
+      return `<tr><td><b>Total Bags</b></td>${cols}</tr>`;
+    };
+
+    const farmerLabel = (displayName || '(stakeholder account)').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    const idx = Math.max(0, plans.findIndex((p: any) => String(p.id) === String(plan.id)));
+    const optionLabel = `Fertilization Recommendation Option ${idx + 1}`;
+
+    const html = `
+      <html>
+        <head>
+          <meta charset="utf-8" />
+          <style>
+            body { font-family: Arial, sans-serif; padding: 30px; }
+            h1 { color: #2e7d32; margin: 0 0 6px; }
+            h3 { margin: 18px 0 10px; }
+            .box { border:1px solid #ccc; padding:14px; border-radius:8px; background:#f8fff9; }
+            table { width:100%; border-collapse:collapse; table-layout: fixed; }
+            th, td { border:1px solid #ccc; padding:8px 10px; vertical-align:middle; }
+            th { background:#e8f5e9; }
+            .hdr { display:flex; justify-content:space-between; align-items:center; padding:10px 12px; background:#2e7d32; color:#fff; border-radius:6px 6px 0 0; }
+            .footer { margin-top: 28px; color:#777; text-align:center; font-size:12px; }
+            .code { font-weight:700; color:#1b5e20; white-space:nowrap; }
+            .name { font-weight:400; color:#2f3b30; font-size:11px; line-height:1.2; word-break:keep-all; hyphens:none; }
+            .bags { text-align:center; white-space:nowrap; }
+          </style>
+        </head>
+        <body>
+          <h1>🌱 Fertilizer Report</h1>
+          <p><b>📅 Date:</b> ${ymd}</p>
+          <p><b>👤 Farmer:</b> ${farmerLabel}</p>
+
+          <h3>📟 Reading Results</h3>
+          <div class="box">
+            <p><b>pH:</b> ${phValue.toFixed(1)} (${phStatus})</p>
+            <p><b>N:</b> ${levelN} &nbsp; <b>P:</b> ${levelP} &nbsp; <b>K:</b> ${levelK}</p>
+            <p><b>Nutrients needed (kg/ha):</b> N ${neededKgHa.N} • P ${neededKgHa.P} • K ${neededKgHa.K}</p>
+            <p><b>Selected:</b> ${variety} • ${soilClass} • ${season}</p>
+          </div>
+
+          <h3>📌 Fertilizer Plan</h3>
+          <div class="hdr">
+            <span>${optionLabel}${plan.isCheapest ? ' • Cheapest' : ''}</span>
+            <span>${cur} ${moneyFmt(Number(plan?.cost?.total || 0))}</span>
+          </div>
+
+          <table>
+            <tr>
+              <th style="text-align:left;">Stages</th>
+              ${headerCols}
+            </tr>
+            ${stageRow('Organic Fertilizer (14 - 30 days ayha sa pagtanom)', fixedSchedule.organic)}
+            ${stageRow('Sa Pagtanom', fixedSchedule.basal)}
+            ${stageRow('Pagkahuman sa ika 30 na adlaw', fixedSchedule.after30DAT)}
+            ${stageRow('Top Dress (60 days ayha sa pag harvest)', fixedSchedule.topdress60DBH)}
+            ${totalRow()}
+          </table>
+
+          <div class="footer">FertiSense • ${today.getFullYear()}</div>
+        </body>
+      </html>
+    `;
+
+    try {
+      const { uri } = await Print.printToFileAsync({ html });
+
+      if (!(await Sharing.isAvailableAsync())) {
+        Alert.alert('Sharing not available', `PDF created at:\n${uri}`);
+        return;
+      }
+
+      await Sharing.shareAsync(uri, {
+        mimeType: 'application/pdf',
+        dialogTitle: 'Save / Share PDF',
+        UTI: 'com.adobe.pdf',
+      });
+    } catch (err: any) {
+      console.error('PDF error:', err);
+      Alert.alert('PDF Error', err?.message ?? 'Could not generate PDF.');
+    } finally {
+      setPdfBusy(false);
+    }
+  }, [pdfBusy, selectedPlan, currency, displayName, phValue, phStatus, levelN, levelP, levelK, neededKgHa, variety, soilClass, season, plans]);
 
   const loadingAny = pricesLoading || loadingPlans;
 
   if (sessionInvalid) {
     return (
       <ScrollView contentContainerStyle={styles.container}>
-        <Image
-          source={require('../../../assets/images/fertisense-logo.png')}
-          style={styles.logo as any}
-          resizeMode="contain"
-        />
+        <Image source={require('../../../assets/images/fertisense-logo.png')} style={styles.logo as any} resizeMode="contain" />
         <View style={styles.readBox}>
           <Text style={styles.readTitle}>⚠️ Invalid Reading</Text>
           <Text style={styles.readLine}>Please go back and read again. The app received 0/invalid NPK values.</Text>
@@ -987,11 +1119,7 @@ export default function RecommendationScreen() {
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
-      <Image
-        source={require('../../../assets/images/fertisense-logo.png')}
-        style={styles.logo as any}
-        resizeMode="contain"
-      />
+      <Image source={require('../../../assets/images/fertisense-logo.png')} style={styles.logo as any} resizeMode="contain" />
 
       <View style={styles.readBox}>
         <Text style={styles.readTitle}>📟 Reading Results</Text>
@@ -1004,6 +1132,14 @@ export default function RecommendationScreen() {
           <Text style={styles.bold}>N:</Text> {levelN}{'  '}
           <Text style={styles.bold}>P:</Text> {levelP}{'  '}
           <Text style={styles.bold}>K:</Text> {levelK}
+        </Text>
+
+        <Text style={styles.readSubtle}>
+          Nutrients needed (kg/ha): N {neededKgHa.N} • P {neededKgHa.P} • K {neededKgHa.K}
+        </Text>
+
+        <Text style={styles.readSubtle}>
+          Selected: {String(variety)} • {String(soilClass)} • {String(season)}
         </Text>
 
         {!!displayName && <Text style={styles.readSubtle}>Farmer: {displayName}</Text>}
