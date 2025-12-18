@@ -1,5 +1,4 @@
 // app/guest/screens/recommendation.tsx
-
 import React from 'react';
 import {
   View,
@@ -13,23 +12,15 @@ import {
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
-import NetInfo from '@react-native-community/netinfo'; 
+import NetInfo from '@react-native-community/netinfo';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 
-import { useAuth } from '../../../context/AuthContext';
-import { useFertilizer } from '../../../context/FertilizerContext';
 import { useReadingSession, type RiceVariety, type SoilClass, type Season } from '../../../context/ReadingSessionContext';
+import { useData } from '../../../context/DataContext';
+import { addGuestReading } from '../../../src/localUsers';
 
-import {
-  addReading,
-  addStandaloneReading,
-  getDaRecommendation, // optional: for npkClass logging only
-  getPublicPrices,
-  type DaRecommendResponse,
-  type AdminPricesDoc,
-} from '../../../src/services';
+import { getPublicPrices, type AdminPricesDoc } from '../../../src/services';
 
 const ORGANIC_FERT_CODE = 'Organic Fertilizer';
 const ORGANIC_BAGS_PER_HA = 10;
@@ -38,7 +29,7 @@ const BAG_KG = 50;
 type Nutrient = 'N' | 'P' | 'K';
 type Lmh = 'L' | 'M' | 'H';
 
-// ✅ FINAL Table 4.5 thresholds (your provided)
+// ✅ FINAL Table 4.5 thresholds (same as stakeholder)
 const THRESH = {
   N: { L: 110, M: 145 },
   P: { L: 315, M: 345 },
@@ -63,20 +54,18 @@ const toLMH_SAFE = (lvl: 'LOW' | 'MEDIUM' | 'HIGH' | 'N/A'): Lmh => {
   return 'L';
 };
 
-const isObjectId = (s?: string) => !!s && /^[a-f0-9]{24}$/i.test(s);
-
+function asArray<T = any>(arr: any): T[] {
+  return Array.isArray(arr) ? (arr as T[]) : [];
+}
+function round2(x: number) {
+  return Math.round((Number(x || 0) + Number.EPSILON) * 100) / 100;
+}
 function bagsFmt(b: number) {
   const n = Number.isFinite(b) ? b : 0;
   return `${n.toFixed(2)} bags`;
 }
 function moneyFmt(v: number) {
   return (v || 0).toFixed(2);
-}
-function asArray<T = any>(arr: any): T[] {
-  return Array.isArray(arr) ? (arr as T[]) : [];
-}
-function round2(x: number) {
-  return Math.round((Number(x || 0) + Number.EPSILON) * 100) / 100;
 }
 
 /** ✅ Fertilizer full names */
@@ -153,6 +142,7 @@ function ensureOrganic(schedule: LocalSchedule, areaHa: number) {
 }
 
 function calcCost(schedule: LocalSchedule, prices: AdminPricesDoc | null): LocalCost | null {
+  // ✅ OFFLINE: no prices => no cost shown
   if (!prices) return null;
 
   const currency = String((prices as any)?.currency || 'PHP');
@@ -168,7 +158,6 @@ function calcCost(schedule: LocalSchedule, prices: AdminPricesDoc | null): Local
     if (String(l.code) === ORGANIC_FERT_CODE) {
       return { phase: l.phase, code: String(l.code), bags: Number(l.bags || 0), pricePerBag: null, subtotal: null };
     }
-
     const item = getItemByCode(prices, l.code);
     const pricePerBag = item?.pricePerBag ?? null;
     const subtotal = pricePerBag == null ? null : round2(pricePerBag * Number(l.bags || 0));
@@ -189,6 +178,10 @@ function markCheapestAmongReal(plans: LocalPlan[]) {
   plans.forEach((p) => (p.isCheapest = false));
   const real = plans.filter(planHasRealFertilizer);
 
+  // ✅ If offline (no cost), do not mark cheapest
+  const allNoCost = real.every((p) => p?.cost == null);
+  if (allNoCost) return;
+
   real.sort((a, b) => {
     const ta = Number(a?.cost?.total ?? Number.POSITIVE_INFINITY);
     const tb = Number(b?.cost?.total ?? Number.POSITIVE_INFINITY);
@@ -203,11 +196,7 @@ function markCheapestAmongReal(plans: LocalPlan[]) {
 }
 
 /**
- * ✅ REQUIREMENTS TABLE
- * Put your real DA table here later.
- * Your confirmed values:
- * - Hybrid light wet (LLL): 120-70-70
- * - Inbred light wet (LLL): 100-60-60
+ * ✅ REQUIREMENTS TABLE (same structure as stakeholder)
  */
 type ReqTable = Record<Nutrient, Record<Lmh, number>>;
 
@@ -242,7 +231,6 @@ const REQ: Record<RiceVariety, Record<SoilClass, Record<Season, ReqTable>>> = {
   inbred: {
     light: {
       wet: {
-        // ✅ YOUR expected inbred light wet LLL => 100-60-60
         N: { L: 100, M: 70, H: 40 },
         P: { L: 60, M: 40, H: 20 },
         K: { L: 60, M: 40, H: 20 },
@@ -285,7 +273,7 @@ function getRequirementKgHa(args: {
 }
 
 /**
- * ✅ FRONTEND BAG SOLVER (your formula)
+ * ✅ FRONTEND BAG SOLVER
  * bags = targetKg / (gradeDecimal * 50)
  */
 const GRADE = {
@@ -301,38 +289,35 @@ function bagsFor(targetKg: number, gradeDec: number) {
   if (!gradeDec || gradeDec <= 0) return 0;
   return targetKg / (gradeDec * BAG_KG);
 }
-
 function suppliedKg(bags: number, gradeDec: number) {
   return bags * BAG_KG * gradeDec;
 }
 
 /**
- * ✅ PLAN 1: Complete (14-14-14) for K, then Ammophos (16-20-0) for remaining P, then Urea (46-0-0) for remaining N
- * This is exactly your Step A/B/C approach.
+ * ✅ PLAN 1: 14-14-14 + 16-20-0 + Urea
  */
-function buildPlan_Complete_Ammophos_Urea(req: { N: number; P: number; K: number }, areaHa: number, prices: AdminPricesDoc | null): LocalPlan {
+function buildPlan_Complete_Ammophos_Urea(
+  req: { N: number; P: number; K: number },
+  areaHa: number,
+  prices: AdminPricesDoc | null
+): LocalPlan {
   const area = Number(areaHa || 1);
   const targetN = req.N * area;
   const targetP = req.P * area;
   const targetK = req.K * area;
 
-  // Step A: 14-14-14 for K
   const b141414 = round2(bagsFor(targetK, GRADE['14-14-14'].K));
   const nFrom141414 = suppliedKg(b141414, GRADE['14-14-14'].N);
   const pFrom141414 = suppliedKg(b141414, GRADE['14-14-14'].P);
 
-  // Remaining targets
   const remP = Math.max(0, targetP - pFrom141414);
   const remN_afterA = Math.max(0, targetN - nFrom141414);
 
-  // Step B: 16-20-0 for remaining P
   const b16200 = round2(remP <= 0 ? 0 : bagsFor(remP, GRADE['16-20-0'].P));
   const nFrom16200 = suppliedKg(b16200, GRADE['16-20-0'].N);
 
-  // Step C: Urea for remaining N after credits
   const remN_final = Math.max(0, remN_afterA - nFrom16200);
   const bUreaTotal = round2(remN_final <= 0 ? 0 : bagsFor(remN_final, GRADE['46-0-0'].N));
-
   const halfUrea = round2(bUreaTotal / 2);
 
   let schedule: LocalSchedule = {
@@ -359,11 +344,12 @@ function buildPlan_Complete_Ammophos_Urea(req: { N: number; P: number; K: number
 
 /**
  * ✅ PLAN 2: DAP + MOP + Urea
- * - MOP satisfies K
- * - DAP satisfies P (and credits N)
- * - Urea tops up remaining N (split)
  */
-function buildPlan_DAP_MOP_UREA(req: { N: number; P: number; K: number }, areaHa: number, prices: AdminPricesDoc | null): LocalPlan {
+function buildPlan_DAP_MOP_UREA(
+  req: { N: number; P: number; K: number },
+  areaHa: number,
+  prices: AdminPricesDoc | null
+): LocalPlan {
   const area = Number(areaHa || 1);
   const targetN = req.N * area;
   const targetP = req.P * area;
@@ -401,11 +387,12 @@ function buildPlan_DAP_MOP_UREA(req: { N: number; P: number; K: number }, areaHa
 
 /**
  * ✅ PLAN 3: 16-20-0 + MOP + Ammosul
- * - MOP satisfies K
- * - 16-20-0 satisfies P (credits N)
- * - Ammosul tops up remaining N (split)
  */
-function buildPlan_16200_MOP_AMMOSUL(req: { N: number; P: number; K: number }, areaHa: number, prices: AdminPricesDoc | null): LocalPlan {
+function buildPlan_16200_MOP_AMMOSUL(
+  req: { N: number; P: number; K: number },
+  areaHa: number,
+  prices: AdminPricesDoc | null
+): LocalPlan {
   const area = Number(areaHa || 1);
   const targetN = req.N * area;
   const targetP = req.P * area;
@@ -450,17 +437,18 @@ function build3FrontendPlans(args: {
   const p2 = buildPlan_DAP_MOP_UREA(args.reqKgHa, args.areaHa, args.prices);
   const p3 = buildPlan_16200_MOP_AMMOSUL(args.reqKgHa, args.areaHa, args.prices);
 
-  // Remove any “organic-only” (should not happen, but safety)
   let plans = [p1, p2, p3].filter((p) => planHasRealFertilizer(p));
 
-  // Sort by cost if available (organic has null price and won’t affect)
-  plans.sort((a, b) => {
-    const ta = a.cost?.total ?? Number.POSITIVE_INFINITY;
-    const tb = b.cost?.total ?? Number.POSITIVE_INFINITY;
-    return ta - tb;
-  });
+  // ✅ If online with prices: sort by cost; if offline: keep stable order
+  const canSort = plans.some((p) => p?.cost?.total != null);
+  if (canSort) {
+    plans.sort((a, b) => {
+      const ta = a.cost?.total ?? Number.POSITIVE_INFINITY;
+      const tb = b.cost?.total ?? Number.POSITIVE_INFINITY;
+      return ta - tb;
+    });
+  }
 
-  // Mark cheapest among real plans
   const top3 = plans.slice(0, 3);
   markCheapestAmongReal(top3);
   return top3;
@@ -493,7 +481,8 @@ function PlanTableCard({
   setSelectedPlanId: (v: string) => void;
 }) {
   const isSelected = String(p.id) === String(selectedPlanId);
-  const cur = p?.cost?.currency || currency || 'PHP';
+  const hasCost = !!p?.cost;
+  const cur = (p?.cost?.currency || currency || 'PHP') as string;
 
   const fixedSchedule = ensureOrganic(
     {
@@ -541,14 +530,21 @@ function PlanTableCard({
       <View style={styles.tableHeader}>
         <View style={{ flex: 1 }}>
           <Text style={styles.tableTitle}>{optionLabel}</Text>
-          <View style={styles.badgeRow}>{p.isCheapest ? <Text style={styles.badge}>Cheapest</Text> : null}</View>
+
+          <View style={styles.badgeRow}>
+            {p.isCheapest ? <Text style={styles.badge}>Cheapest</Text> : null}
+            {!hasCost ? <Text style={styles.badge}>Offline: price unavailable</Text> : null}
+          </View>
+
           <Text style={styles.tableSub}>Tap Select to choose this plan for PDF</Text>
         </View>
 
         <View style={{ alignItems: 'flex-end', gap: 8 }}>
-          <Text style={styles.priceTag}>
-            {cur} {moneyFmt(Number(p?.cost?.total || 0))}
-          </Text>
+          {hasCost ? (
+            <Text style={styles.priceTag}>
+              {cur} {moneyFmt(Number(p?.cost?.total || 0))}
+            </Text>
+          ) : null}
 
           <Pressable
             onPress={() => setSelectedPlanId(String(p.id))}
@@ -664,16 +660,12 @@ function PlanTableCard({
   );
 }
 
-export default function RecommendationScreen() {
+export default function GuestRecommendationScreen() {
   const router = useRouter();
-  const { token, user } = useAuth();
-  const { currency, loading: pricesLoading } = useFertilizer();
   const { result: session } = useReadingSession();
+  const { addReading } = useData();
 
-  const farmerId = session?.farmerId ?? '';
-  const displayName = (user?.name || user?.username || session?.farmerName || '').trim();
-
-  // ✅ read user-selected options from session
+  // ✅ options from session (same pattern as stakeholder)
   const variety: RiceVariety = session?.variety ?? 'hybrid';
   const soilClass: SoilClass = session?.soilClass ?? 'light';
   const season: Season = session?.season ?? 'wet';
@@ -684,6 +676,8 @@ export default function RecommendationScreen() {
   const kValue = Number(session?.k ?? 0);
   const phValue = Number(session?.ph ?? 6.5);
   const sessionTs = Number(session?.ts ?? 0);
+
+  const displayName = String(session?.farmerName || 'Guest').trim();
 
   const phStatus = phValue < 5.5 ? 'Acidic' : phValue > 7.5 ? 'Alkaline' : 'Neutral';
 
@@ -701,192 +695,114 @@ export default function RecommendationScreen() {
   const pClass = toLMH_SAFE(levelP);
   const kClass = toLMH_SAFE(levelK);
 
-  // ✅ nutrients needed changes with variety/soil/season
   const neededKgHa = React.useMemo(() => {
     return getRequirementKgHa({ variety, soilClass, season, nClass, pClass, kClass });
   }, [variety, soilClass, season, nClass, pClass, kClass]);
 
-  const [resp, setResp] = React.useState<DaRecommendResponse | null>(null);
   const [plansState, setPlansState] = React.useState<LocalPlan[]>([]);
   const [loadingPlans, setLoadingPlans] = React.useState(false);
   const [selectedPlanId, setSelectedPlanId] = React.useState<string | null>(null);
+  const [currency, setCurrency] = React.useState<string | null>('PHP');
 
   const isSavingRef = React.useRef(false);
   const lastSavedKeyRef = React.useRef<string>('');
   const lastLoadedSessionKeyRef = React.useRef<string>('');
   const inFlightRef = React.useRef(false);
 
-  const cropKey = variety === 'inbred' ? 'rice_inbred' : 'rice_hybrid';
-
-  const persistLocalHistory = React.useCallback(
-  async (plansForHistory: LocalPlan[], selectedId?: string | null, respSnapshot?: any) => {
-    if (!user?._id) return;
-
-    try {
-      const userKey = `history:${user._id}`;
-      const date = new Date().toLocaleDateString('en-US', {
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric',
-      });
-
-      const phStr = `${phValue.toFixed(1)} (${phStatus})`;
-
-      // ✅ store a lightweight index list (names + costs) for compatibility
-      const fertilizerPlans =
-        Array.isArray(plansForHistory) && plansForHistory.length
-          ? plansForHistory.map((p: any, idx: number) => ({
-              name: `Fertilization Recommendation Option ${idx + 1}${p.isCheapest ? ' • Cheapest' : ''}`,
-              cost: `${p?.cost?.currency || currency || 'PHP'} ${moneyFmt(Number(p?.cost?.total || 0))}`,
-              details: [],
-            }))
-          : [];
-
-      // ✅ store the REAL schedules to be shown in History table
-      const plansSnapshot =
-        Array.isArray(plansForHistory) && plansForHistory.length
-          ? plansForHistory.map((p) => ({
-              id: String(p.id),
-              label: String(p.label || ''),
-              isCheapest: !!p.isCheapest,
-              schedule: p.schedule,
-              cost: p.cost,
-            }))
-          : [];
-
-      const npkClassValue = respSnapshot?.classified?.npkClass || `${nClass}${pClass}${kClass}`;
-
-      const newItem: any = {
-      id: `reading_${sessionTs || Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      date,
-      ph: phStr,
-      n_value: nValue,
-      p_value: pValue,
-      k_value: kValue,
-
-    
-      neededKgHa: {
-        N: Number(neededKgHa?.N || 0),
-        P: Number(neededKgHa?.P || 0),
-        K: Number(neededKgHa?.K || 0),
-      },
-
-      recommendationText: '',
-      englishText: '',
-
-      fertilizerPlans,
-
-  
-      plansSnapshot,
-      selectedPlanId: selectedId ? String(selectedId) : null,
-
-   
-      currency: currency || 'PHP',
-      npkClass: npkClassValue,
-      variety,
-      soilClass,
-      season,
-    };
-
-
-      const raw = await AsyncStorage.getItem(userKey);
-      const prev = raw ? JSON.parse(raw) : [];
-      await AsyncStorage.setItem(userKey, JSON.stringify([newItem, ...prev]));
-    } catch (e) {
-      console.warn('local history save warn:', e);
-    }
-  },
-  [
-    user?._id,
-    nValue,
-    pValue,
-    kValue,
-    phValue,
-    phStatus,
-    currency,
-    sessionTs,
-    variety,
-    soilClass,
-    season,
-    nClass,
-    pClass,
-    kClass,
-  ]
-);
-
-  const saveReading = React.useCallback(
-    async (plansSnapshot: LocalPlan[], selectedId?: string | null, respSnapshot?: any) => {
-      const saveKey = `${user?._id || 'nouser'}:${sessionTs || 'notime'}:${nValue}:${pValue}:${kValue}:${phValue}:${variety}:${soilClass}:${season}`;
-      if (lastSavedKeyRef.current === saveKey) return;
-      if (isSavingRef.current) return;
-
-      isSavingRef.current = true;
-
+  const persistGuestHistory = React.useCallback(
+    async (plansForHistory: LocalPlan[], selectedId?: string | null) => {
       try {
-        const net = await NetInfo.fetch();
-        const online =
-          net.isInternetReachable === true ? true : net.isInternetReachable === false ? false : !!net.isConnected;
-
-        const chosen =
-          (selectedId ? plansSnapshot?.find((p: any) => String(p.id) === String(selectedId)) : null) ||
-          plansSnapshot?.[0];
+        const date = new Date().toISOString();
 
         const fertilizerPlans =
-          Array.isArray(plansSnapshot) && plansSnapshot.length
-            ? plansSnapshot.map((p: any, idx: number) => ({
+          Array.isArray(plansForHistory) && plansForHistory.length
+            ? plansForHistory.map((p: any, idx: number) => ({
                 name: `Fertilization Recommendation Option ${idx + 1}${p.isCheapest ? ' • Cheapest' : ''}`,
-                cost: `${p?.cost?.currency || currency || 'PHP'} ${moneyFmt(Number(p?.cost?.total || 0))}`,
+                cost: p?.cost
+                  ? `${p?.cost?.currency || currency || 'PHP'} ${moneyFmt(Number(p?.cost?.total || 0))}`
+                  : 'Price unavailable (offline)',
                 details: [],
               }))
             : [];
 
-        const payload: any = {
-          N: nValue,
-          P: pValue,
-          K: kValue,
+        const plansSnapshot =
+          Array.isArray(plansForHistory) && plansForHistory.length
+            ? plansForHistory.map((p) => ({
+                id: String(p.id),
+                label: String(p.label || ''),
+                isCheapest: !!p.isCheapest,
+                schedule: p.schedule,
+                cost: p.cost,
+              }))
+            : [];
+
+        const reading: any = {
+          name: displayName || 'Guest',
+          code: 'GUEST',
+          date,
+          n: nValue,
+          p: pValue,
+          k: kValue,
           ph: phValue,
-          source: 'esp32',
-          recommendationText: '',
-          englishText: '',
+
           fertilizerPlans,
-          currency: chosen?.cost?.currency || currency || 'PHP',
-          daSchedule: chosen?.schedule ?? null,
-          daCost: chosen?.cost ?? null,
-          npkClass: respSnapshot?.classified?.npkClass || `${nClass}${pClass}${kClass}`,
+          plansSnapshot,
+          selectedPlanId: selectedId ? String(selectedId) : null,
+
+          neededKgHa: {
+            N: Number(neededKgHa?.N || 0),
+            P: Number(neededKgHa?.P || 0),
+            K: Number(neededKgHa?.K || 0),
+          },
+
+          recommendation: [
+            `FertiSense Recommendation\nN=${levelN}, P=${levelP}, K=${levelK}\nNeeded (kg/ha): N ${neededKgHa.N} • P ${neededKgHa.P} • K ${neededKgHa.K}\nSelected: ${variety} • ${soilClass} • ${season}`,
+          ],
+
           variety,
           soilClass,
           season,
         };
 
-        if (online && token) {
-          if (farmerId && isObjectId(farmerId)) await addReading({ ...payload, farmerId }, token);
-          else await addStandaloneReading(payload, token);
-        }
+        addReading(reading);
+        await addGuestReading(reading);
+      } catch (e) {
+        console.warn('guest local save warn:', e);
+      }
+    },
+    [addReading, currency, displayName, kValue, levelK, levelN, levelP, nValue, neededKgHa, pValue, phValue, soilClass, season, variety]
+  );
 
-        await persistLocalHistory(plansSnapshot || [], selectedId ?? null, respSnapshot);
+  const saveOncePerSession = React.useCallback(
+    async (plansSnapshot: LocalPlan[], selectedId?: string | null) => {
+      const saveKey = `guest:${sessionTs || 'notime'}:${nValue}:${pValue}:${kValue}:${phValue}:${variety}:${soilClass}:${season}`;
+      if (lastSavedKeyRef.current === saveKey) return;
+      if (isSavingRef.current) return;
+
+      isSavingRef.current = true;
+      try {
+        await persistGuestHistory(plansSnapshot || [], selectedId ?? null);
         lastSavedKeyRef.current = saveKey;
-      } catch (e: any) {
-        console.error('save error:', e?.message || e);
-        await persistLocalHistory(plansSnapshot || []);
       } finally {
         isSavingRef.current = false;
       }
     },
-    [user?._id, sessionTs, nValue, pValue, kValue, phValue, token, farmerId, currency, persistLocalHistory, nClass, pClass, kClass, variety, soilClass, season]
+    [kValue, nValue, pValue, phValue, persistGuestHistory, season, sessionTs, soilClass, variety]
   );
 
   const fetchAndBuildPlans = React.useCallback(async () => {
     setLoadingPlans(true);
+
     try {
-      // ✅ We only fetch prices for COST and fetch DA only for optional logging (npkClass etc)
-      const [r, pd] = await Promise.all([
-        token ? getDaRecommendation(token, { crop: cropKey, nClass, pClass, kClass, areaHa }).catch(() => null) : Promise.resolve(null),
-        getPublicPrices().catch(() => null),
-      ]);
+      const net = await NetInfo.fetch();
+      const online =
+        net.isInternetReachable === true ? true : net.isInternetReachable === false ? false : !!net.isConnected;
 
-      setResp(r as any);
+      const pd = online ? await getPublicPrices().catch(() => null) : null;
 
-      // ✅ Build plans using FRONTEND math
+      const cur = String((pd as any)?.currency || 'PHP');
+      setCurrency(cur);
+
       const localPlans = build3FrontendPlans({
         prices: pd as any,
         reqKgHa: neededKgHa,
@@ -901,16 +817,16 @@ export default function RecommendationScreen() {
         return firstId;
       });
 
-      await saveReading(localPlans, firstId, r);
+      await saveOncePerSession(localPlans, firstId);
       return localPlans;
     } catch (e: any) {
-      console.error('fetch/build plans error:', e?.message || e);
+      console.error('guest fetch/build plans error:', e?.message || e);
       setPlansState([]);
       return [];
     } finally {
       setLoadingPlans(false);
     }
-  }, [token, cropKey, nClass, pClass, kClass, areaHa, neededKgHa, saveReading]);
+  }, [areaHa, neededKgHa, saveOncePerSession]);
 
   useFocusEffect(
     React.useCallback(() => {
@@ -918,7 +834,7 @@ export default function RecommendationScreen() {
         if (sessionInvalid) return;
         if (inFlightRef.current) return;
 
-        const sessionKey = `${user?._id || 'nouser'}:${sessionTs}:${nValue}:${pValue}:${kValue}:${phValue}:${nClass}${pClass}${kClass}:${variety}:${soilClass}:${season}`;
+        const sessionKey = `guest:${sessionTs}:${nValue}:${pValue}:${kValue}:${phValue}:${nClass}${pClass}${kClass}:${variety}:${soilClass}:${season}`;
         if (lastLoadedSessionKeyRef.current === sessionKey) return;
 
         inFlightRef.current = true;
@@ -932,7 +848,7 @@ export default function RecommendationScreen() {
       })();
 
       return () => {};
-    }, [fetchAndBuildPlans, sessionInvalid, user?._id, sessionTs, nValue, pValue, kValue, phValue, nClass, pClass, kClass, variety, soilClass, season])
+    }, [fetchAndBuildPlans, sessionInvalid, sessionTs, nValue, pValue, kValue, phValue, nClass, pClass, kClass, variety, soilClass, season])
   );
 
   const plans = plansState;
@@ -1018,10 +934,10 @@ export default function RecommendationScreen() {
       return `<tr><td><b>Total Bags</b></td>${cols}</tr>`;
     };
 
-    const farmerLabel = (displayName || '(stakeholder account)').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-
     const idx = Math.max(0, plans.findIndex((p: any) => String(p.id) === String(plan.id)));
     const optionLabel = `Fertilization Recommendation Option ${idx + 1}`;
+
+    const hasCost = !!plan?.cost;
 
     const html = `
       <html>
@@ -1040,12 +956,13 @@ export default function RecommendationScreen() {
             .code { font-weight:700; color:#1b5e20; white-space:nowrap; }
             .name { font-weight:400; color:#2f3b30; font-size:11px; line-height:1.2; word-break:keep-all; hyphens:none; }
             .bags { text-align:center; white-space:nowrap; }
+            .muted { color:#666; font-size:12px; }
           </style>
         </head>
         <body>
           <h1>🌱 Fertilizer Report</h1>
           <p><b>📅 Date:</b> ${ymd}</p>
-          <p><b>👤 Farmer:</b> ${farmerLabel}</p>
+          <p><b>👤 Farmer:</b> ${String(displayName || 'Guest').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</p>
 
           <h3>📟 Reading Results</h3>
           <div class="box">
@@ -1058,7 +975,7 @@ export default function RecommendationScreen() {
           <h3>📌 Fertilizer Plan</h3>
           <div class="hdr">
             <span>${optionLabel}${plan.isCheapest ? ' • Cheapest' : ''}</span>
-            <span>${cur} ${moneyFmt(Number(plan?.cost?.total || 0))}</span>
+            <span>${hasCost ? `${cur} ${moneyFmt(Number(plan?.cost?.total || 0))}` : 'Price unavailable (offline)'}</span>
           </div>
 
           <table>
@@ -1073,6 +990,7 @@ export default function RecommendationScreen() {
             ${totalRow()}
           </table>
 
+          <p class="muted">Note: If you generated this PDF offline, fertilizer prices may be unavailable.</p>
           <div class="footer">FertiSense • ${today.getFullYear()}</div>
         </body>
       </html>
@@ -1097,9 +1015,22 @@ export default function RecommendationScreen() {
     } finally {
       setPdfBusy(false);
     }
-  }, [pdfBusy, selectedPlan, currency, displayName, phValue, phStatus, levelN, levelP, levelK, neededKgHa, variety, soilClass, season, plans]);
-
-  const loadingAny = pricesLoading || loadingPlans;
+  }, [
+    pdfBusy,
+    selectedPlan,
+    currency,
+    displayName,
+    phValue,
+    phStatus,
+    levelN,
+    levelP,
+    levelK,
+    neededKgHa,
+    variety,
+    soilClass,
+    season,
+    plans,
+  ]);
 
   if (sessionInvalid) {
     return (
@@ -1146,12 +1077,13 @@ export default function RecommendationScreen() {
       </View>
 
       <View style={styles.divider} />
-
       <Text style={styles.sectionTitle}>Fertilization Recommendation Options</Text>
 
-      {loadingAny && <Text style={{ textAlign: 'center', color: '#888', marginVertical: 10 }}>Loading Plans...</Text>}
+      {loadingPlans && (
+        <Text style={{ textAlign: 'center', color: '#888', marginVertical: 10 }}>Loading Plans...</Text>
+      )}
 
-      {!loadingAny && plans.length === 0 && (
+      {!loadingPlans && plans.length === 0 && (
         <Text style={{ textAlign: 'center', color: '#888', marginVertical: 10 }}>No plans available.</Text>
       )}
 
@@ -1169,8 +1101,8 @@ export default function RecommendationScreen() {
       <View style={styles.downloadToggle}>
         <Text style={styles.downloadLabel}>Save a copy (selected plan)</Text>
 
-        <TouchableOpacity onPress={handleSavePDF} disabled={pdfBusy || loadingAny}>
-          <Text style={[styles.downloadButton, (pdfBusy || loadingAny) && styles.disabledText]}>
+        <TouchableOpacity onPress={handleSavePDF} disabled={pdfBusy || loadingPlans}>
+          <Text style={[styles.downloadButton, (pdfBusy || loadingPlans) && styles.disabledText]}>
             {pdfBusy ? 'Generating…' : '📄 Download PDF'}
           </Text>
         </TouchableOpacity>
@@ -1277,16 +1209,8 @@ const styles = StyleSheet.create({
   totalStageText: { fontSize: 12, fontWeight: 'bold', color: '#111', textAlign: 'left' },
   totalBagsText: { fontSize: 12, fontWeight: 'bold', color: '#111', textAlign: 'center' },
 
-  progressTrack: {
-    height: 5,
-    backgroundColor: '#e6e6e6',
-    borderTopWidth: 1,
-    borderTopColor: '#ddd',
-  },
-  progressThumb: {
-    height: 5,
-    backgroundColor: '#2e7d32',
-  },
+  progressTrack: { height: 5, backgroundColor: '#e6e6e6', borderTopWidth: 1, borderTopColor: '#ddd' },
+  progressThumb: { height: 5, backgroundColor: '#2e7d32' },
 
   downloadToggle: {
     flexDirection: 'row',

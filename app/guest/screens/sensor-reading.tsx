@@ -250,15 +250,18 @@ export default function SensorReadingScreen() {
       if (abortRef.current.cancelled) return;
 
       router.replace({
-        pathname: '/guest/screens/reconnect-prompt',
-        params: {
-          farmerId: String(farmerId ?? ''),
-          n: String(avgN),
-          p: String(avgP),
-          k: String(avgK),
-          ph: Number.isFinite(avgPH) ? String(avgPH) : '',
-        },
-      });
+  pathname: '/guest/screens/reconnect-prompt',
+  params: {
+    farmerId: String(farmerId ?? ''),
+    farmerName: farmerName || 'Guest',
+    ts: String(tsNum),
+    n: String(avgN),
+    p: String(avgP),
+    k: String(avgK),
+    ph: Number.isFinite(avgPH) ? String(avgPH) : '',
+  },
+});
+
     },
     [farmerId, router, setFromParams, setLatestSensorData, token, user?.name, user?.username, user?._id]
   );

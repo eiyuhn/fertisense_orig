@@ -5,6 +5,7 @@ import { useRouter, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 
 import { useReadingSession } from '../../../context/ReadingSessionContext';
+import { ESP_SSID } from '../../../src/esp32';
 
 type Params = {
   n?: string;
@@ -13,6 +14,7 @@ type Params = {
   ph?: string;
   farmerId?: string;
   farmerName?: string;
+  ts?: string;
 };
 
 const toNum = (v: any): number | undefined => {
@@ -26,7 +28,6 @@ export default function ReconnectPromptScreen() {
   const params = useLocalSearchParams<Params>();
   const { setFromParams, result } = useReadingSession();
 
-  // Prevent double-writing session (can happen on focus / re-render)
   const didInitRef = useRef(false);
 
   useEffect(() => {
@@ -48,6 +49,8 @@ export default function ReconnectPromptScreen() {
         const pk = toNum(params.k);
         const pph = toNum(params.ph);
 
+        const ts = toNum(params.ts) ?? Date.now();
+
         if (!hasSessionReading) {
           await setFromParams({
             n: pn,
@@ -56,7 +59,7 @@ export default function ReconnectPromptScreen() {
             ph: pph,
             farmerId: typeof params.farmerId === 'string' ? params.farmerId : undefined,
             farmerName: typeof params.farmerName === 'string' ? params.farmerName : undefined,
-            ts: Date.now(),
+            ts,
           });
           return;
         }
@@ -69,40 +72,30 @@ export default function ReconnectPromptScreen() {
           });
         }
       } catch (e) {
-        console.warn('[ReconnectPrompt] failed to set reading session:', e);
+        console.warn('[Guest ReconnectPrompt] failed to set reading session:', e);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleProceed = () => {
-    // ✅ FIX: DO NOT include "/app" in paths.
-    // ✅ FIX: Explicit stakeholder route group.
     router.replace('/guest/screens/recommendation');
   };
 
   return (
     <View style={styles.container}>
-      <Ionicons
-        name="cloud-offline-outline"
-        size={80}
-        color="#E53935"
-        style={{ marginBottom: 20 }}
-      />
+      <Ionicons name="cloud-offline-outline" size={80} color="#E53935" style={{ marginBottom: 20 }} />
 
       <Text style={styles.title}>Kinahanglan og Internet Connection</Text>
 
       <Text style={styles.instruction}>
         Nahuman na ang pagbasa sa sensor.
-        <Text style={styles.bold}>
-          {' '}
-          Kinahanglan ka mobalik sa imong normal nga Wi-Fi (nga naay internet){' '}
-        </Text>
-        aron ma-upload ang datos ug makuha ang rekomendasyon.
+        <Text style={styles.bold}> Kinahanglan ka mobalik sa imong normal nga Wi-Fi (nga naay internet) </Text>
+        aron makuha ang rekomendasyon ug presyo sa abono.
       </Text>
 
       <Text style={styles.instructionNote}>
-        1. I-disconnect ang <Text style={styles.bold}>"Fertisense_AP"</Text> nga Wi-Fi.
+        1. I-disconnect ang <Text style={styles.bold}>"{ESP_SSID}"</Text> nga Wi-Fi.
       </Text>
 
       <Text style={styles.instructionNote}>
@@ -118,33 +111,10 @@ export default function ReconnectPromptScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 30,
-    backgroundColor: '#fff',
-  },
-  title: {
-    fontSize: 22,
-    fontWeight: 'bold',
-    color: '#2e7d32',
-    marginBottom: 15,
-    textAlign: 'center',
-  },
-  instruction: {
-    fontSize: 16,
-    color: '#444',
-    textAlign: 'center',
-    marginBottom: 20,
-    lineHeight: 24,
-  },
-  instructionNote: {
-    fontSize: 15,
-    color: '#333',
-    textAlign: 'center',
-    marginBottom: 8,
-  },
+  container: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 30, backgroundColor: '#fff' },
+  title: { fontSize: 22, fontWeight: 'bold', color: '#2e7d32', marginBottom: 15, textAlign: 'center' },
+  instruction: { fontSize: 16, color: '#444', textAlign: 'center', marginBottom: 20, lineHeight: 24 },
+  instructionNote: { fontSize: 15, color: '#333', textAlign: 'center', marginBottom: 8 },
   bold: { fontWeight: 'bold' },
   actionButton: {
     marginTop: 40,
@@ -157,10 +127,5 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     elevation: 5,
   },
-  actionButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-    marginLeft: 8,
-  },
+  actionButtonText: { color: '#fff', fontSize: 16, fontWeight: '600', marginLeft: 8 },
 });
