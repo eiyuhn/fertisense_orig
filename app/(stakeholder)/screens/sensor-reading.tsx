@@ -249,7 +249,7 @@ export default function SensorReadingScreen() {
       await new Promise((r) => setTimeout(r, 600));
       if (abortRef.current.cancelled) return;
 
-      router.push({
+      router.replace({
         pathname: '/(stakeholder)/screens/reconnect-prompt',
         params: {
           farmerId: String(farmerId ?? ''),

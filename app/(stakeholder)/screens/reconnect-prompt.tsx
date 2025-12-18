@@ -1,11 +1,11 @@
 // app/(stakeholder)/screens/reconnect-prompt.tsx
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 
 import { useReadingSession } from '../../../context/ReadingSessionContext';
-import { ESP_SSID } from '../../../src/esp32';
+
 type Params = {
   n?: string;
   p?: string;
@@ -16,7 +16,7 @@ type Params = {
 };
 
 const toNum = (v: any): number | undefined => {
-  if (v === null || v === undefined) return undefined;
+  if (v === null || v === undefined || v === '') return undefined;
   const n = Number(v);
   return Number.isFinite(n) ? n : undefined;
 };
@@ -24,27 +24,60 @@ const toNum = (v: any): number | undefined => {
 export default function ReconnectPromptScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<Params>();
-  const { setFromParams } = useReadingSession();
+  const { setFromParams, result } = useReadingSession();
+
+  // Prevent double-writing session (can happen on focus / re-render)
+  const didInitRef = useRef(false);
 
   useEffect(() => {
+    if (didInitRef.current) return;
+    didInitRef.current = true;
+
     (async () => {
       try {
-        await setFromParams({
-          n: toNum(params.n),
-          p: toNum(params.p),
-          k: toNum(params.k),
-          ph: toNum(params.ph),
-          farmerId: typeof params.farmerId === 'string' ? params.farmerId : undefined,
-          farmerName: typeof params.farmerName === 'string' ? params.farmerName : undefined,
-          ts: Date.now(),
-        });
+        const hasSessionReading =
+          !!result &&
+          typeof result === 'object' &&
+          Number.isFinite((result as any).n) &&
+          Number.isFinite((result as any).p) &&
+          Number.isFinite((result as any).k) &&
+          (((result as any).n !== 0) || ((result as any).p !== 0) || ((result as any).k !== 0));
+
+        const pn = toNum(params.n);
+        const pp = toNum(params.p);
+        const pk = toNum(params.k);
+        const pph = toNum(params.ph);
+
+        if (!hasSessionReading) {
+          await setFromParams({
+            n: pn,
+            p: pp,
+            k: pk,
+            ph: pph,
+            farmerId: typeof params.farmerId === 'string' ? params.farmerId : undefined,
+            farmerName: typeof params.farmerName === 'string' ? params.farmerName : undefined,
+            ts: Date.now(),
+          });
+          return;
+        }
+
+        // session exists: patch only metadata
+        if (params.farmerId || params.farmerName) {
+          await setFromParams({
+            farmerId: typeof params.farmerId === 'string' ? params.farmerId : undefined,
+            farmerName: typeof params.farmerName === 'string' ? params.farmerName : undefined,
+          });
+        }
       } catch (e) {
         console.warn('[ReconnectPrompt] failed to set reading session:', e);
       }
     })();
-  }, [params, setFromParams]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleProceed = () => {
+    // ✅ FIX: DO NOT include "/app" in paths.
+    // ✅ FIX: Explicit stakeholder route group.
     router.replace('/(stakeholder)/screens/recommendation');
   };
 
