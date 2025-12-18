@@ -40,6 +40,35 @@ type StakeholderReading = {
   ph?: number | null;
 };
 
+// ✅ LMH helpers (same thresholds as your recommendation screen)
+type LMH = 'Low' | 'Medium' | 'High';
+
+function toNumberSafe(v: any): number {
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function classifyN(v: number): LMH {
+  const x = toNumberSafe(v);
+  if (x <= 110) return 'Low';
+  if (x <= 145) return 'Medium';
+  return 'High';
+}
+
+function classifyP(v: number): LMH {
+  const x = toNumberSafe(v);
+  if (x <= 315) return 'Low';
+  if (x <= 345) return 'Medium';
+  return 'High';
+}
+
+function classifyK(v: number): LMH {
+  const x = toNumberSafe(v);
+  if (x <= 150) return 'Low';
+  if (x <= 380) return 'Medium';
+  return 'High';
+}
+
 export default function StakeholderHome() {
   const router = useRouter();
   const { user } = useAuth();
@@ -99,6 +128,15 @@ export default function StakeholderHome() {
     return `${raw}?t=${imgKey}`;
   };
   const fullPhotoUrl = buildPhotoUrl(profileImageUrl);
+
+  // ✅ Build LMH subtitle instead of ppm numbers
+  const lmhSubtitle = lastReading
+    ? `N: ${classifyN(lastReading.n)} | P: ${classifyP(lastReading.p)} | K: ${classifyK(lastReading.k)}${
+        lastReading.ph !== undefined && lastReading.ph !== null
+          ? ` | pH: ${lastReading.ph}`
+          : ''
+      }`
+    : '';
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
@@ -170,13 +208,7 @@ export default function StakeholderHome() {
               title={`Latest Reading: ${new Date(
                 lastReading.timestamp
               ).toLocaleString('en-PH')}`}
-              subtitle={`N: ${lastReading.n} | P: ${lastReading.p} | K: ${
-                lastReading.k
-              }${
-                lastReading.ph !== undefined && lastReading.ph !== null
-                  ? ` | pH: ${lastReading.ph}`
-                  : ''
-              }`}
+              subtitle={lmhSubtitle}
             />
           ) : (
             <InfoCard

@@ -114,7 +114,7 @@ export default function SelectOptionsScreen() {
         onPress={handleProceed}
       >
         <Ionicons name="arrow-forward-circle" size={20} color="#fff" />
-        <Text style={styles.proceedText}> Magpatuloy</Text>
+        <Text style={styles.proceedText}> Magpadayun</Text>
       </TouchableOpacity>
     </SafeAreaView>
   );

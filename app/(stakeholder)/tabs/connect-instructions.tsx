@@ -24,12 +24,15 @@ export default function ConnectInstructionsScreen() {
 
   async function handleConnect() {
     if (busy) return;
+
     setBusy(true);
     setStatusMessage(`Connecting to ${ESP_SSID}...`);
+
     try {
       await autoConnectToESP32();
-      setStatusMessage('Connected successfully!');
-      await new Promise((r) => setTimeout(r, 800));
+
+      setStatusMessage('Connected to ESP32 successfully!');
+      await new Promise((r) => setTimeout(r, 400));
 
       router.push({
         pathname: '/(stakeholder)/screens/select-options' as const,
@@ -40,7 +43,7 @@ export default function ConnectInstructionsScreen() {
       Alert.alert(
         'Connection Error',
         err?.message ||
-          `Could not connect to ${ESP_SSID}. Please check Wi-Fi, enable Location (Android), turn off mobile data, and try again.`
+          `Not connected to "${ESP_SSID}". Please connect to the ESP32 Wi-Fi first, then press Connect.`
       );
     } finally {
       setBusy(false);
@@ -53,32 +56,25 @@ export default function ConnectInstructionsScreen() {
         style={styles.container}
         contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + 40 }]}
       >
-       
-
-        {/* Logo */}
         <Image
           source={require('../../../assets/images/fertisense-logo.png')}
           style={styles.logo}
           resizeMode="contain"
         />
 
-        {/* Title */}
         <Text style={styles.title}>Connect to Device</Text>
 
-        {/* Instruction card */}
         <View style={styles.card}>
           <Text style={styles.lead}>
             Ayha makita ang datos, ikonekta una ang device sa imong cellphone.
           </Text>
 
-          {/* Step list */}
           <InstructionRow icon="power" text="I-on ang imong sensor device." />
-          <InstructionRow icon="wifi" text="I-on ang Wi-Fi ug pangitaa ang ESP32-NPK." /> “ESP32-NPK” 
+          <InstructionRow icon="wifi" text={`I-on ang Wi-Fi ug pangitaa ang "${ESP_SSID}".`} />
           <InstructionRow icon="swap-horizontal" text="Pinduta ang ‘Connect’ aron makakonek sa sensor." />
-          <InstructionRow icon="leaf" text="Pilia kung unsang klase sa humay ang imong itanom." />
-          <InstructionRow icon="checkmark-circle" text="Hulata nga makakonek ug makita ang ‘Successful’ nga status." />
+          <InstructionRow icon="leaf" text="Pilia ang options sa humay (hybrid/inbred, yuta, season)." />
+          <InstructionRow icon="analytics" text="Human sa pagbasa, ang NPK i-classify as LOW/MEDIUM/HIGH para sa recommendation." />
 
-          {/* Connect button */}
           <TouchableOpacity
             style={[styles.cta, busy && styles.ctaDisabled]}
             onPress={handleConnect}
@@ -98,24 +94,14 @@ export default function ConnectInstructionsScreen() {
             )}
           </TouchableOpacity>
 
-          {/* Status Message */}
-          {statusMessage !== '' && (
-            <Text style={styles.statusText}>{statusMessage}</Text>
-          )}
+          {statusMessage !== '' && <Text style={styles.statusText}>{statusMessage}</Text>}
         </View>
       </ScrollView>
     </SafeAreaView>
   );
 }
 
-/** Reusable step row */
-function InstructionRow({
-  icon,
-  text,
-}: {
-  icon: keyof typeof Ionicons.glyphMap;
-  text: string;
-}) {
+function InstructionRow({ icon, text }: { icon: keyof typeof Ionicons.glyphMap; text: string }) {
   return (
     <View style={rowStyles.row}>
       <View style={rowStyles.bullet}>
@@ -126,32 +112,14 @@ function InstructionRow({
   );
 }
 
-/* Theme colors */
 const GREEN = '#2e7d32';
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: '#ffffff' },
   container: { flex: 1, backgroundColor: '#ffffff' },
-  content: {
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingTop: 70,
-  },
-
-  back: {
-    position: 'absolute',
-    top: 22,
-    left: 16,
-    zIndex: 10,
-    backgroundColor: '#ffffff',
-    borderRadius: 20,
-    padding: 6,
-    elevation: 2,
-  },
-
+  content: { alignItems: 'center', paddingHorizontal: 20, paddingTop: 70 },
   logo: { width: 120, height: 78, marginBottom: 10, marginTop: -40 },
   title: { fontSize: 20, fontWeight: '700', color: GREEN, marginBottom: 16 },
-
   card: {
     width: '100%',
     backgroundColor: '#f7fbf7',
@@ -161,23 +129,7 @@ const styles = StyleSheet.create({
     padding: 18,
     marginBottom: 28,
   },
-  lead: {
-    fontSize: 14,
-    color: '#2b2b2b',
-    lineHeight: 20,
-    marginBottom: 14,
-    textAlign: 'center',
-  },
-
-  stepText: {
-    flex: 1,
-    fontSize: 15,
-    color: '#434343',
-    lineHeight: 21,
-  },
-
-  bold: { fontWeight: '800' },
-
+  lead: { fontSize: 14, color: '#2b2b2b', lineHeight: 20, marginBottom: 14, textAlign: 'center' },
   cta: {
     marginTop: 10,
     width: '100%',
@@ -190,19 +142,8 @@ const styles = StyleSheet.create({
     elevation: 3,
   },
   ctaDisabled: { backgroundColor: '#a5d6a7' },
-  ctaText: {
-    color: '#ffffff',
-    fontSize: 16,
-    fontWeight: '700',
-    letterSpacing: 0.2,
-  },
-
-  statusText: {
-    textAlign: 'center',
-    color: GREEN,
-    fontSize: 13,
-    marginTop: 10,
-  },
+  ctaText: { color: '#ffffff', fontSize: 16, fontWeight: '700', letterSpacing: 0.2 },
+  statusText: { textAlign: 'center', color: GREEN, fontSize: 13, marginTop: 10 },
 });
 
 const rowStyles = StyleSheet.create({

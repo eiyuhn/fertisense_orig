@@ -5,7 +5,7 @@ import { useRouter, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 
 import { useReadingSession } from '../../../context/ReadingSessionContext';
-
+import { ESP_SSID } from '../../../src/esp32';
 type Params = {
   n?: string;
   p?: string;
@@ -69,7 +69,7 @@ export default function ReconnectPromptScreen() {
       </Text>
 
       <Text style={styles.instructionNote}>
-        1. I-disconnect ang <Text style={styles.bold}>"ESP32-NPK"</Text> nga Wi-Fi.
+        1. I-disconnect ang <Text style={styles.bold}>"Fertisense_AP"</Text> nga Wi-Fi.
       </Text>
 
       <Text style={styles.instructionNote}>

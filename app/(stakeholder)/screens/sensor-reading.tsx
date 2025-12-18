@@ -14,11 +14,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import {
-  autoConnectToESP32,
-  readNpkFromESP32,
-  ESP_SSID,
-} from '../../../src/esp32';
+import { autoConnectToESP32, readNowFromESP32, ESP_SSID } from '../../../src/esp32';
 import { useData } from '../../../context/DataContext';
 import { useAuth } from '../../../context/AuthContext';
 import { useReadingSession } from '../../../context/ReadingSessionContext';
@@ -43,43 +39,48 @@ type NpkJson = {
   p_kg_ha?: number;
   k_kg_ha?: number;
   error?: string;
-  levels?: Levels; // optional if ESP32 sends it
+  levels?: Levels;
 };
 
 const TOTAL_STEPS = 10;
-const MIN_READING_DURATION_MS = 3500; // 3.5 s
+const MIN_READING_DURATION_MS = 3500;
 
 type Nutrient = 'N' | 'P' | 'K';
 
-// ✅ DA-style thresholds (sensor-based interpretation)
-const classifyLevel = (
-  nutrient: Nutrient,
-  v?: number
-): 'LOW' | 'MEDIUM' | 'HIGH' | 'N/A' => {
+// ✅ FINAL Table 4.5 thresholds (same as recommendation)
+const THRESH = {
+  N: { L: 110, M: 145 },
+  P: { L: 315, M: 345 },
+  K: { L: 150, M: 380 },
+} as const;
+
+const classifyLevel = (nutrient: Nutrient, v?: number): 'LOW' | 'MEDIUM' | 'HIGH' | 'N/A' => {
   if (typeof v !== 'number' || !Number.isFinite(v)) return 'N/A';
-
   const ppm = Math.round(v);
-
-  // if sensor returns 0 (common when not inserted / error), show N/A (or LOW if you want)
   if (ppm <= 0) return 'N/A';
 
-  if (nutrient === 'N') {
-    if (ppm <= 100) return 'LOW';
-    if (ppm <= 200) return 'MEDIUM';
-    return 'HIGH'; // >= 201
-  }
-
-  if (nutrient === 'P') {
-    if (ppm <= 110) return 'LOW';
-    if (ppm <= 200) return 'MEDIUM';
-    return 'HIGH'; // >= 201
-  }
-
-  // nutrient === 'K'
-  if (ppm <= 117) return 'LOW';
-  if (ppm <= 275) return 'MEDIUM';
-  return 'HIGH'; // >= 276
+  const t = THRESH[nutrient];
+  if (ppm < t.L) return 'LOW';
+  if (ppm <= t.M) return 'MEDIUM';
+  return 'HIGH';
 };
+
+function isValidNpk(data: any): data is NpkJson {
+  if (!data || typeof data !== 'object') return false;
+  if (data.ok === false) return false;
+
+  const n = data.n;
+  const p = data.p;
+  const k = data.k;
+
+  if (typeof n !== 'number' || typeof p !== 'number' || typeof k !== 'number') return false;
+  if (!Number.isFinite(n) || !Number.isFinite(p) || !Number.isFinite(k)) return false;
+
+  // Reject "not inserted / failed poll"
+  if (n === 0 && p === 0 && k === 0) return false;
+
+  return true;
+}
 
 export default function SensorReadingScreen() {
   const router = useRouter();
@@ -91,7 +92,7 @@ export default function SensorReadingScreen() {
   const [currentStep, setCurrentStep] = useState(0);
   const [readings, setReadings] = useState<NpkJson[]>([]);
   const [isReadingStep, setIsReadingStep] = useState(false);
-  const [statusMessage, setStatusMessage] = useState('Pislita ang Start para magsugod.');
+  const [statusMessage, setStatusMessage] = useState('Pinduta ang Start para magsugod.');
 
   const [spotResult, setSpotResult] = useState<NpkJson | null>(null);
   const [spotIndex, setSpotIndex] = useState<number | null>(null);
@@ -102,7 +103,7 @@ export default function SensorReadingScreen() {
     setCurrentStep(0);
     setReadings([]);
     setIsReadingStep(false);
-    setStatusMessage('Pislita ang Start para magsugod.');
+    setStatusMessage('Pinduta ang "Sugdi ang Pagbasa" para magsugod.');
     setSpotResult(null);
     setSpotIndex(null);
     abortRef.current.cancelled = false;
@@ -112,47 +113,41 @@ export default function SensorReadingScreen() {
     };
   }, []);
 
+  // ✅ HARD-GATE: must be reachable before reading
+  const ensureConnected = useCallback(async () => {
+    await autoConnectToESP32();
+  }, []);
+
   const readOnce = useCallback(async (): Promise<NpkJson | null> => {
     try {
-      console.log('[SensorReading] calling readNpkFromESP32()...');
-      const data = await readNpkFromESP32();
-      console.log('[SensorReading] raw ESP32 data:', data);
+      await ensureConnected();
 
-      if (!data || typeof data !== 'object') {
-        Alert.alert(
-          'Dili Sakto ang Tubag',
-          'Ang ESP32 naghatag ug dili sakto nga tubag (dili siya JSON object).'
-        );
+      const data = await readNowFromESP32();
+      if (!isValidNpk(data)) {
+        if (data?.ok === false) {
+          Alert.alert('Error sa Sensor', data?.error || 'ok=false from ESP32');
+        } else {
+          Alert.alert(
+            'Sensor Error',
+            'Invalid reading (possible not inserted / not connected). Itusok ug tarong ang sensor sa yuta ug sulayi balik.'
+          );
+        }
         return null;
       }
-
-      if ((data as any).ok === false) {
-        const errMsg =
-          (data as any).error || 'Ang ESP32 nitubag ug ok=false (naay problema sa sensor).';
-        Alert.alert('Error sa Sensor', errMsg);
-        return null;
-      }
-
-      const { n, p, k } = data as any;
-      if (typeof n !== 'number' || typeof p !== 'number' || typeof k !== 'number') {
-        Alert.alert('Dili Sakto ang Data', 'Wala nibalik ug numero nga NPK values ang ESP32.');
-        return null;
-      }
-
       return data as NpkJson;
     } catch (e: any) {
-      console.error('[SensorReading] readOnce error:', e);
       Alert.alert(
         'Error sa Pagbasa',
-        e?.message || 'Dili mabasa gikan sa ESP32 (network o sensor error).'
+        e?.message || `Dili mabasa gikan sa ESP32. Siguraduhang connected ka sa "${ESP_SSID}".`
       );
       return null;
     }
-  }, []);
+  }, [ensureConnected]);
 
   const processResultsAndNavigate = useCallback(
     async (allReadings: NpkJson[]) => {
       if (abortRef.current.cancelled) return;
+
       setCurrentStep(TOTAL_STEPS + 1);
       setStatusMessage('Gikuwenta ang average...');
 
@@ -170,6 +165,19 @@ export default function SensorReadingScreen() {
       const avgPHRaw = avg(pHs);
       const avgPH = Number.isFinite(avgPHRaw) ? avgPHRaw : NaN;
 
+      if (
+        !Number.isFinite(avgN) ||
+        !Number.isFinite(avgP) ||
+        !Number.isFinite(avgK) ||
+        (avgN === 0 && avgP === 0 && avgK === 0)
+      ) {
+        Alert.alert('Invalid Result', 'Walay valid average. Please re-read and make sure inserted ang sensor.');
+        setCurrentStep(0);
+        setReadings([]);
+        setStatusMessage('Pinduta ang "Sugdi ang Pagbasa" para magsugod.');
+        return;
+      }
+
       const tsNum = Date.now();
 
       const finalResult = {
@@ -184,6 +192,10 @@ export default function SensorReadingScreen() {
 
       setLatestSensorData(finalResult);
 
+      // ✅ correct display name to store into session
+      const farmerName = (user?.name || user?.username || '').trim();
+
+      // local cache
       try {
         if (user?._id) {
           const key = `stakeholder:lastReading:${user._id}`;
@@ -193,6 +205,7 @@ export default function SensorReadingScreen() {
             p: avgP,
             k: avgK,
             ph: Number.isFinite(avgPH) ? avgPH : undefined,
+            farmerName, // ✅ cache name too
           };
           await AsyncStorage.setItem(key, JSON.stringify(payload));
         }
@@ -200,6 +213,7 @@ export default function SensorReadingScreen() {
         console.warn('[SensorReading] failed to cache stakeholder last reading:', e);
       }
 
+      // ✅ put into ReadingSession (recommendation reads this)
       try {
         await setFromParams({
           n: avgN,
@@ -207,12 +221,14 @@ export default function SensorReadingScreen() {
           k: avgK,
           ph: Number.isFinite(avgPH) ? avgPH : undefined,
           farmerId: typeof farmerId === 'string' ? farmerId : undefined,
+          farmerName, // ✅ IMPORTANT FIX
           ts: tsNum,
         });
       } catch (e) {
         console.warn('[SensorReading] failed to set reading session:', e);
       }
 
+      // optional: push standalone reading (quick log)
       try {
         if (token) {
           await addStandaloneReading(
@@ -230,13 +246,13 @@ export default function SensorReadingScreen() {
         console.warn('[SensorReading] failed to push standalone reading:', e);
       }
 
-      await new Promise((r) => setTimeout(r, 1000));
+      await new Promise((r) => setTimeout(r, 600));
       if (abortRef.current.cancelled) return;
 
       router.push({
         pathname: '/(stakeholder)/screens/reconnect-prompt',
         params: {
-          farmerId: finalResult.farmerId,
+          farmerId: String(farmerId ?? ''),
           n: String(avgN),
           p: String(avgP),
           k: String(avgK),
@@ -244,7 +260,7 @@ export default function SensorReadingScreen() {
         },
       });
     },
-    [farmerId, router, setFromParams, setLatestSensorData, token, user?._id]
+    [farmerId, router, setFromParams, setLatestSensorData, token, user?.name, user?.username, user?._id]
   );
 
   const handleReadNextStep = useCallback(async () => {
@@ -260,13 +276,11 @@ export default function SensorReadingScreen() {
     setStatusMessage(`${stepToRead}/${TOTAL_STEPS} - Nagbasa sa yuta...`);
 
     let data: NpkJson | null = null;
+
     for (let attempt = 1; attempt <= 2 && !data; attempt++) {
-      if (abortRef.current.cancelled) {
-        setIsReadingStep(false);
-        return;
-      }
+      if (abortRef.current.cancelled) break;
       data = await readOnce();
-      if (!data) await new Promise((r) => setTimeout(r, 600));
+      if (!data) await new Promise((r) => setTimeout(r, 700));
     }
 
     if (abortRef.current.cancelled) {
@@ -285,18 +299,11 @@ export default function SensorReadingScreen() {
 
     if (!data) {
       setIsReadingStep(false);
-      setStatusMessage(`Napakyas ang pagbasa sa ${stepToRead}. Pislita para mosulay balik.`);
+      setStatusMessage(`Nawala ang pagbasa sa ${stepToRead}. Pinduta para mosulay balik.`);
       Alert.alert(
         'Walay nabasang data',
-        'Wala mi nakakuha ug reading. Duola ang phone ug sulayi pag-usab.'
+        `Wala mi nakakuha ug valid reading sa spot ${stepToRead}. Siguraduhang connected ka sa "${ESP_SSID}" ug itusok ang sensor sa yuta.`
       );
-      return;
-    }
-
-    if (typeof data.n !== 'number' || typeof data.p !== 'number' || typeof data.k !== 'number') {
-      setIsReadingStep(false);
-      setStatusMessage(`Dili sakto ang data sa ${stepToRead}. Pislita para mosulay balik.`);
-      Alert.alert('Dili Sakto ang Data', `Kulangan ang NPK sa spot ${stepToRead}.`);
       return;
     }
 
@@ -312,9 +319,7 @@ export default function SensorReadingScreen() {
       processResultsAndNavigate(newReadings);
     } else {
       setCurrentStep(nextStep);
-      setStatusMessage(
-        `OK ang pagbasa ${stepToRead}/${TOTAL_STEPS}. Pinduta para sa spot ${nextStep}.`
-      );
+      setStatusMessage(`OK ang pagbasa ${stepToRead}/${TOTAL_STEPS}. Pinduta para sa spot ${nextStep}.`);
       setIsReadingStep(false);
     }
   }, [currentStep, isReadingStep, readOnce, readings, processResultsAndNavigate]);
@@ -324,21 +329,20 @@ export default function SensorReadingScreen() {
     setIsReadingStep(true);
     setStatusMessage(`Gitan-aw ang koneksyon sa ${ESP_SSID}...`);
     try {
-      await autoConnectToESP32();
+      await ensureConnected();
       if (abortRef.current.cancelled) return;
       setCurrentStep(1);
-      setStatusMessage(`Andam na para mobasa sa spot 1/${TOTAL_STEPS}. Pislita ang button.`);
+      setStatusMessage(`Andam na para mobasa sa spot 1/${TOTAL_STEPS}. Pinduta ang button.`);
     } catch (err: any) {
       if (abortRef.current.cancelled) return;
-      Alert.alert('Error sa Koneksyon', err.message || `Dili makakonek.`);
+      Alert.alert('Error sa Koneksyon', err?.message || `Dili makakonek sa "${ESP_SSID}".`);
       setStatusMessage('Nawala ang koneksyon. Sulayi ug Start pag-usab.');
     } finally {
       if (!abortRef.current.cancelled) setIsReadingStep(false);
     }
   };
 
-  const displayedStep =
-    currentStep === 0 ? 0 : currentStep > TOTAL_STEPS ? TOTAL_STEPS : currentStep;
+  const displayedStep = currentStep === 0 ? 0 : currentStep > TOTAL_STEPS ? TOTAL_STEPS : currentStep;
 
   const fmtPh = (v: any) => {
     if (v === null || v === undefined) return '0.00';
@@ -352,38 +356,20 @@ export default function SensorReadingScreen() {
 
   return (
     <SafeAreaView style={styles.safe}>
-      <ScrollView
-        contentContainerStyle={styles.scrollContent}
-        showsVerticalScrollIndicator={false}
-      >
-        <Image
-          source={require('../../../assets/images/fertisense-logo.png')}
-          style={styles.logo}
-        />
+      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+        <Image source={require('../../../assets/images/fertisense-logo.png')} style={styles.logo} />
 
         <View style={styles.readingBox}>
           <Text style={styles.title}>Itusok ang Sensor sa Yuta</Text>
-          <Text style={styles.engSub}>
-            Kuhaa ang {TOTAL_STEPS} ka readings. Pinduta ang button kada spot.
-          </Text>
-          
+          <Text style={styles.engSub}>Kuhaa ang {TOTAL_STEPS} ka readings. Pinduta ang button kada spot.</Text>
 
           <View style={styles.statusDisplay}>
             <View style={styles.progressCircle}>
               <View style={styles.progressInner}>
                 {isReadingStep ? (
-                  <ActivityIndicator
-                    size="small"
-                    color="#2e7d32"
-                    style={styles.circleSpinner}
-                  />
+                  <ActivityIndicator size="small" color="#2e7d32" style={styles.circleSpinner} />
                 ) : (
-                  <Ionicons
-                    name="leaf-outline"
-                    size={24}
-                    color="#2e7d32"
-                    style={styles.circleSpinner}
-                  />
+                  <Ionicons name="leaf-outline" size={24} color="#2e7d32" style={styles.circleSpinner} />
                 )}
                 <Text style={styles.progressLabel}>Spot</Text>
                 <Text style={styles.progressStep}>
@@ -415,17 +401,8 @@ export default function SensorReadingScreen() {
               onPress={handleStart}
               disabled={isReadingStep}
             >
-              <Ionicons
-                name="hardware-chip-outline"
-                size={22}
-                color={isReadingStep ? '#eee' : '#fff'}
-              />
-              <Text
-                style={[
-                  styles.actionButtonText,
-                  isReadingStep && styles.disabledButtonText,
-                ]}
-              >
+              <Ionicons name="hardware-chip-outline" size={22} color={isReadingStep ? '#eee' : '#fff'} />
+              <Text style={[styles.actionButtonText, isReadingStep && styles.disabledButtonText]}>
                 {isReadingStep ? 'Gisusi...' : 'Sugdi ang Pagbasa'}
               </Text>
             </TouchableOpacity>
@@ -437,20 +414,9 @@ export default function SensorReadingScreen() {
               onPress={handleReadNextStep}
               disabled={isReadingStep}
             >
-              <Ionicons
-                name="radio-button-on-outline"
-                size={22}
-                color={isReadingStep ? '#eee' : '#fff'}
-              />
-              <Text
-                style={[
-                  styles.actionButtonText,
-                  isReadingStep && styles.disabledButtonText,
-                ]}
-              >
-                {isReadingStep
-                  ? `Nagbasa sa Spot ${currentStep}...`
-                  : `Basaha ang Spot ${currentStep}/${TOTAL_STEPS}`}
+              <Ionicons name="radio-button-on-outline" size={22} color={isReadingStep ? '#eee' : '#fff'} />
+              <Text style={[styles.actionButtonText, isReadingStep && styles.disabledButtonText]}>
+                {isReadingStep ? `Nagbasa sa Spot ${currentStep}...` : `Basaha ang Spot ${currentStep}/${TOTAL_STEPS}`}
               </Text>
             </TouchableOpacity>
           )}
@@ -458,9 +424,7 @@ export default function SensorReadingScreen() {
           {currentStep > TOTAL_STEPS && (
             <TouchableOpacity style={[styles.actionButton, styles.disabledButton]} disabled>
               <ActivityIndicator size="small" color="#eee" style={{ marginRight: 10 }} />
-              <Text style={[styles.actionButtonText, styles.disabledButtonText]}>
-                Ginaproseso...
-              </Text>
+              <Text style={[styles.actionButtonText, styles.disabledButtonText]}>Ginaproseso...</Text>
             </TouchableOpacity>
           )}
         </View>
@@ -470,10 +434,7 @@ export default function SensorReadingScreen() {
 }
 
 const styles = StyleSheet.create({
-  safe: {
-    flex: 1,
-    backgroundColor: '#ffffffff',
-  },
+  safe: { flex: 1, backgroundColor: '#ffffffff' },
   scrollContent: {
     flexGrow: 1,
     alignItems: 'center',
@@ -501,20 +462,8 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   engSub: { fontSize: 15, color: '#555', textAlign: 'center', marginBottom: 6 },
-  tagalogSub: {
-    fontSize: 13,
-    color: '#555',
-    textAlign: 'center',
-    fontStyle: 'italic',
-    marginBottom: 20,
-  },
 
-  statusDisplay: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    width: '100%',
-    marginTop: 4,
-  },
+  statusDisplay: { alignItems: 'center', justifyContent: 'center', width: '100%', marginTop: 4 },
 
   progressCircle: {
     width: 150,
@@ -535,20 +484,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  circleSpinner: {
-    marginBottom: 4,
-  },
-  progressLabel: {
-    fontSize: 14,
-    color: '#2e7d32',
-    fontWeight: '600',
-  },
-  progressStep: {
-    fontSize: 18,
-    color: '#1b5e20',
-    fontWeight: '800',
-    marginTop: 2,
-  },
+  circleSpinner: { marginBottom: 4 },
+  progressLabel: { fontSize: 14, color: '#2e7d32', fontWeight: '600' },
+  progressStep: { fontSize: 18, color: '#1b5e20', fontWeight: '800', marginTop: 2 },
 
   statusText: {
     fontSize: 16,
@@ -568,23 +506,10 @@ const styles = StyleSheet.create({
     borderColor: '#cde9cf',
     width: '90%',
   },
-  spotResultTitle: {
-    fontWeight: '700',
-    color: '#1b5e20',
-    marginBottom: 4,
-    textAlign: 'center',
-  },
-  spotResultLine: {
-    fontSize: 14,
-    color: '#1b5e20',
-    marginTop: 2,
-  },
+  spotResultTitle: { fontWeight: '700', color: '#1b5e20', marginBottom: 4, textAlign: 'center' },
+  spotResultLine: { fontSize: 14, color: '#1b5e20', marginTop: 2 },
 
-  buttonContainer: {
-    width: '100%',
-    alignItems: 'center',
-    marginTop: 8,
-  },
+  buttonContainer: { width: '100%', alignItems: 'center', marginTop: 8 },
   actionButton: {
     backgroundColor: '#2e7d32',
     flexDirection: 'row',
@@ -596,12 +521,7 @@ const styles = StyleSheet.create({
     elevation: 3,
     minWidth: 250,
   },
-  actionButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-    marginLeft: 8,
-  },
+  actionButtonText: { color: '#fff', fontSize: 16, fontWeight: '600', marginLeft: 8 },
   disabledButton: { backgroundColor: '#a5d6a7', elevation: 1 },
   disabledButtonText: { color: '#eee' },
 });

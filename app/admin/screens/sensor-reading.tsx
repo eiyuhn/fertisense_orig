@@ -1,43 +1,29 @@
-// app/(admin)/screens/sensor-reading.tsx
-import React, {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-} from 'react';
+import React, { useEffect, useCallback, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  FlatList,
   Image,
-  Modal,
   StyleSheet,
   Text,
-  TextInput,
   TouchableOpacity,
   View,
   ScrollView,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import Ionicons from '@expo/vector-icons/Ionicons';
+import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-// --- Production imports (same as stakeholder) ---
-import {
-  autoConnectToESP32,
-  readNpkFromESP32,
-  ESP_SSID,
-} from '../../../src/esp32';
+import { autoConnectToESP32, readNowFromESP32, ESP_SSID } from '../../../src/esp32';
 import { useData } from '../../../context/DataContext';
 import { useAuth } from '../../../context/AuthContext';
-import { listFarmers } from '../../../src/services';
-
-type Farmer = { _id: string; name: string };
+import { useReadingSession } from '../../../context/ReadingSessionContext';
+import { addStandaloneReading } from '../../../src/services';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 type Levels = {
-  n?: 'LOW' | 'MEDIUM' | 'HIGH' | string;
-  p?: 'LOW' | 'MEDIUM' | 'HIGH' | string;
-  k?: 'LOW' | 'MEDIUM' | 'HIGH' | string;
+  n?: 'LOW' | 'MEDIUM' | 'HIGH' | 'N/A' | string;
+  p?: 'LOW' | 'MEDIUM' | 'HIGH' | 'N/A' | string;
+  k?: 'LOW' | 'MEDIUM' | 'HIGH' | 'N/A' | string;
 };
 
 type NpkJson = {
@@ -58,453 +44,326 @@ type NpkJson = {
 const TOTAL_STEPS = 10;
 const MIN_READING_DURATION_MS = 3500;
 
-// ✅ Same thresholds as stakeholder screen
-const classifyLevel = (v?: number): 'LOW' | 'MEDIUM' | 'HIGH' | 'N/A' => {
+type Nutrient = 'N' | 'P' | 'K';
+
+const THRESH = {
+  N: { L: 110, M: 145 },
+  P: { L: 315, M: 345 },
+  K: { L: 150, M: 380 },
+} as const;
+
+const classifyLevel = (nutrient: Nutrient, v?: number): 'LOW' | 'MEDIUM' | 'HIGH' | 'N/A' => {
   if (typeof v !== 'number' || !Number.isFinite(v)) return 'N/A';
-  if (v <= 117) return 'LOW';
-  if (v <= 235) return 'MEDIUM';
+  const ppm = Math.round(v);
+  if (ppm <= 0) return 'N/A';
+
+  const t = THRESH[nutrient];
+  if (ppm < t.L) return 'LOW';
+  if (ppm <= t.M) return 'MEDIUM';
   return 'HIGH';
 };
 
+function isValidNpk(data: any): data is NpkJson {
+  if (!data || typeof data !== 'object') return false;
+  if (data.ok === false) return false;
+
+  const n = data.n;
+  const p = data.p;
+  const k = data.k;
+
+  if (typeof n !== 'number' || typeof p !== 'number' || typeof k !== 'number') return false;
+  if (!Number.isFinite(n) || !Number.isFinite(p) || !Number.isFinite(k)) return false;
+
+  if (n === 0 && p === 0 && k === 0) return false;
+
+  return true;
+}
+
 export default function AdminSensorReadingScreen() {
   const router = useRouter();
-
-  // 👇 Accept BOTH `farmerName` and `name` (for safety)
-  const {
-    farmerId: paramFarmerId,
-    farmerName: paramFarmerName,
-    name: paramName,
-  } = useLocalSearchParams<{
-    farmerId?: string;
-    farmerName?: string;
-    name?: string;
-  }>();
-
-  const initialFarmerId = paramFarmerId ?? '';
-  const initialFarmerName =
-    (paramFarmerName as string) || (paramName as string) || '';
-
+  const { farmerId } = useLocalSearchParams<{ farmerId?: string }>();
   const { setLatestSensorData } = useData();
-  const { token } = useAuth();
+  const { token, user } = useAuth();
+  const { setFromParams } = useReadingSession();
 
-  // ---------- Farmer selection ----------
-  const [farmers, setFarmers] = useState<Farmer[]>([]);
-  const [filter, setFilter] = useState('');
-  const [pickerOpen, setPickerOpen] = useState(false);
-
-  const [selectedFarmerId, setSelectedFarmerId] =
-    useState<string>(initialFarmerId);
-  const [selectedFarmerName, setSelectedFarmerName] =
-    useState<string>(initialFarmerName);
-
-  const loadFarmers = useCallback(
-    async () => {
-      try {
-        const data = await listFarmers(token);
-        const list = (Array.isArray(data) ? data : []) as Farmer[];
-        setFarmers(list);
-
-        // If we have an ID but no name yet, try to resolve name from the list
-        if (initialFarmerId && !selectedFarmerName) {
-          const f = list.find((x) => x._id === initialFarmerId);
-          if (f) {
-            setSelectedFarmerId(f._id);
-            setSelectedFarmerName(f.name);
-          }
-        }
-      } catch (e) {
-        console.error('listFarmers error:', e);
-        Alert.alert(
-          'Cannot load farmers',
-          'Farmers could not be loaded from the server. ' +
-            'If you are connected to the ESP32 Wi-Fi, go back to Home and select a farmer while online.'
-        );
-      }
-    },
-    [token, initialFarmerId, selectedFarmerName]
-  );
-
-  // ⛔ Only auto-load when we don't already have a preselected farmerId.
-  useEffect(() => {
-    if (!initialFarmerId) {
-      loadFarmers();
-    }
-  }, [loadFarmers, initialFarmerId]);
-
-  const filteredFarmers = farmers.filter((f) =>
-    f.name.toLowerCase().includes(filter.trim().toLowerCase())
-  );
-
-  const chooseFarmer = (f: Farmer) => {
-    setSelectedFarmerId(f._id);
-    setSelectedFarmerName(f.name);
-    setPickerOpen(false);
-  };
-
-  // Lazy-load farmers when opening picker
-  const handleOpenFarmerPicker = async () => {
-    if (farmers.length === 0) {
-      await loadFarmers();
-    }
-    setPickerOpen(true);
-  };
-
-  // ---------- Reading state ----------
   const [currentStep, setCurrentStep] = useState(0);
   const [readings, setReadings] = useState<NpkJson[]>([]);
   const [isReadingStep, setIsReadingStep] = useState(false);
-  const [statusMessage, setStatusMessage] =
-    useState<string>('Select a farmer to begin.');
-  const [isInitialLoad, setIsInitialLoad] = useState(false);
+  const [statusMessage, setStatusMessage] = useState('Pinduta ang Start para magsugod.');
 
-  // 👇 Spot result (like stakeholder, but admin)
   const [spotResult, setSpotResult] = useState<NpkJson | null>(null);
   const [spotIndex, setSpotIndex] = useState<number | null>(null);
 
-  const abortRef = useRef<{ cancelled: boolean }>({
-    cancelled: false,
-  });
+  const abortRef = useRef<{ cancelled: boolean }>({ cancelled: false });
 
   useEffect(() => {
     setCurrentStep(0);
     setReadings([]);
     setIsReadingStep(false);
-    setStatusMessage('Select a farmer to begin.');
-    setIsInitialLoad(false);
+    setStatusMessage('Pinduta ang "Sugdi ang Pagbasa" para magsugod.');
     setSpotResult(null);
     setSpotIndex(null);
     abortRef.current.cancelled = false;
+
     return () => {
       abortRef.current.cancelled = true;
     };
   }, []);
 
-  // Small helpers to format display like stakeholder
-  const fmt = (v: any) => {
-    if (v === null || v === undefined) return '0';
-    const n = Number(v);
-    return Number.isFinite(n) ? String(n) : '0';
-  };
-  const fmtPh = (v: any) => {
-    if (v === null || v === undefined) return '0.00';
-    const n = Number(v);
-    return Number.isFinite(n) ? n.toFixed(2) : '0.00';
-  };
+  const ensureConnected = useCallback(async () => {
+    await autoConnectToESP32();
+  }, []);
 
-  const spotLevelN = spotResult?.levels?.n ?? classifyLevel(spotResult?.n);
-  const spotLevelP = spotResult?.levels?.p ?? classifyLevel(spotResult?.p);
-  const spotLevelK = spotResult?.levels?.k ?? classifyLevel(spotResult?.k);
-
-  // ---------- ESP32 read helpers ----------
   const readOnce = useCallback(async (): Promise<NpkJson | null> => {
     try {
-      const data = await readNpkFromESP32();
-      if (!data || typeof data !== 'object') {
-        console.warn('readOnce received invalid data:', data);
+      await ensureConnected();
+
+      const data = await readNowFromESP32();
+      if (!isValidNpk(data)) {
+        if (data?.ok === false) {
+          Alert.alert('Error sa Sensor', data?.error || 'ok=false from ESP32');
+        } else {
+          Alert.alert(
+            'Sensor Error',
+            'Invalid reading (possible not inserted / not connected). Itusok ug tarong ang sensor sa yuta ug sulayi balik.'
+          );
+        }
         return null;
-      }
-      if ((data as any).ok === false) {
-        console.warn('ESP32 responded with ok=false:', data);
-        return data as NpkJson;
       }
       return data as NpkJson;
     } catch (e: any) {
-      console.error('Error in readOnce:', e);
+      Alert.alert(
+        'Error sa Pagbasa',
+        e?.message || `Dili mabasa gikan sa ESP32. Siguraduhang connected ka sa "${ESP_SSID}".`
+      );
       return null;
     }
-  }, []);
+  }, [ensureConnected]);
 
   const processResultsAndNavigate = useCallback(
     async (allReadings: NpkJson[]) => {
       if (abortRef.current.cancelled) return;
 
       setCurrentStep(TOTAL_STEPS + 1);
-      setStatusMessage('Calculating average...');
+      setStatusMessage('Gikuwenta ang average...');
 
-      const Ns = allReadings
-        .map((r) => r.n)
-        .filter((n) => typeof n === 'number') as number[];
-      const Ps = allReadings
-        .map((r) => r.p)
-        .filter((p) => typeof p === 'number') as number[];
-      const Ks = allReadings
-        .map((r) => r.k)
-        .filter((k) => typeof k === 'number') as number[];
-      const pHs = allReadings
-        .map((r) => r.ph)
-        .filter((ph) => typeof ph === 'number') as number[];
+      const Ns = allReadings.map((r) => r.n).filter((n) => typeof n === 'number') as number[];
+      const Ps = allReadings.map((r) => r.p).filter((n) => typeof n === 'number') as number[];
+      const Ks = allReadings.map((r) => r.k).filter((n) => typeof n === 'number') as number[];
+      const pHs = allReadings.map((r) => r.ph).filter((n) => typeof n === 'number') as number[];
 
       const avg = (arr: number[]) =>
-        arr.length
-          ? Math.round(
-              (arr.reduce((a, b) => a + b, 0) / arr.length) * 10
-            ) / 10
-          : 0;
+        arr.length ? Math.round((arr.reduce((a, b) => a + b, 0) / arr.length) * 10) / 10 : 0;
 
       const avgN = avg(Ns);
       const avgP = avg(Ps);
       const avgK = avg(Ks);
-      const avgPH =
-        Math.round((avg(pHs) + Number.EPSILON) * 10) / 10;
+      const avgPHRaw = avg(pHs);
+      const avgPH = Number.isFinite(avgPHRaw) ? avgPHRaw : NaN;
+
+      if (
+        !Number.isFinite(avgN) ||
+        !Number.isFinite(avgP) ||
+        !Number.isFinite(avgK) ||
+        (avgN === 0 && avgP === 0 && avgK === 0)
+      ) {
+        Alert.alert('Invalid Result', 'Walay valid average. Please re-read and make sure inserted ang sensor.');
+        setCurrentStep(0);
+        setReadings([]);
+        setStatusMessage('Pinduta ang "Sugdi ang Pagbasa" para magsugod.');
+        return;
+      }
+
+      const tsNum = Date.now();
 
       const finalResult = {
         n: avgN,
         p: avgP,
         k: avgK,
         ph: Number.isFinite(avgPH) ? avgPH : undefined,
-        timestamp: String(Date.now()),
-        farmerId: selectedFarmerId,
-        farmerName: selectedFarmerName,
+        timestamp: String(tsNum),
+        farmerId: String(farmerId ?? ''),
         readings: allReadings,
       };
 
       setLatestSensorData(finalResult);
 
-      await new Promise((r) => setTimeout(r, 900));
+      const farmerName = (user?.name || user?.username || '').trim();
+
+      // local cache (admin version key)
+      try {
+        if (user?._id) {
+          const key = `admin:lastReading:${user._id}`;
+          const payload = {
+            timestamp: tsNum,
+            n: avgN,
+            p: avgP,
+            k: avgK,
+            ph: Number.isFinite(avgPH) ? avgPH : undefined,
+            farmerName,
+          };
+          await AsyncStorage.setItem(key, JSON.stringify(payload));
+        }
+      } catch (e) {
+        console.warn('[AdminSensorReading] failed to cache admin last reading:', e);
+      }
+
+      try {
+        await setFromParams({
+          n: avgN,
+          p: avgP,
+          k: avgK,
+          ph: Number.isFinite(avgPH) ? avgPH : undefined,
+          farmerId: typeof farmerId === 'string' ? farmerId : undefined,
+          farmerName,
+          ts: tsNum,
+        });
+      } catch (e) {
+        console.warn('[AdminSensorReading] failed to set reading session:', e);
+      }
+
+      // optional: push standalone reading
+      try {
+        if (token) {
+          await addStandaloneReading(
+            {
+              N: avgN,
+              P: avgP,
+              K: avgK,
+              ph: Number.isFinite(avgPH) ? avgPH : undefined,
+              source: 'esp32',
+            },
+            token
+          );
+        }
+      } catch (e) {
+        console.warn('[AdminSensorReading] failed to push standalone reading:', e);
+      }
+
+      await new Promise((r) => setTimeout(r, 600));
       if (abortRef.current.cancelled) return;
 
       router.push({
         pathname: '/admin/screens/reconnect-prompt',
         params: {
-          farmerId: finalResult.farmerId,
-          name: finalResult.farmerName ?? '',
+          farmerId: String(farmerId ?? ''),
           n: String(avgN),
           p: String(avgP),
           k: String(avgK),
-          ph: String(avgPH),
+          ph: Number.isFinite(avgPH) ? String(avgPH) : '',
         },
       });
     },
-    [
-      router,
-      selectedFarmerId,
-      selectedFarmerName,
-      setLatestSensorData,
-    ]
+    [farmerId, router, setFromParams, setLatestSensorData, token, user?.name, user?.username, user?._id]
   );
 
-  const handleReadNextStep = useCallback(
-    async () => {
-      if (!selectedFarmerId) {
-        Alert.alert(
-          'Select Farmer',
-          'Please choose a farmer before reading.'
-        );
-        return;
-      }
-      if (
-        isReadingStep ||
-        currentStep > TOTAL_STEPS ||
-        currentStep === 0
-      )
-        return;
-      if (abortRef.current.cancelled) return;
+  const handleReadNextStep = useCallback(async () => {
+    if (isReadingStep || currentStep > TOTAL_STEPS || currentStep === 0) return;
+    if (abortRef.current.cancelled) return;
 
-      setIsReadingStep(true);
-      const stepToRead = currentStep;
+    setSpotResult(null);
+    setSpotIndex(null);
 
-      // Clear previous spot result when starting a new read
-      setSpotResult(null);
-      setSpotIndex(null);
+    setIsReadingStep(true);
+    const stepToRead = currentStep;
+    const startTime = Date.now();
+    setStatusMessage(`${stepToRead}/${TOTAL_STEPS} - Nagbasa sa yuta...`);
 
-      setStatusMessage(
-        `📍 ${stepToRead}/${TOTAL_STEPS} - Reading soil...`
-      );
+    let data: NpkJson | null = null;
 
-      const startTime = Date.now();
+    for (let attempt = 1; attempt <= 2 && !data; attempt++) {
+      if (abortRef.current.cancelled) break;
+      data = await readOnce();
+      if (!data) await new Promise((r) => setTimeout(r, 700));
+    }
 
-      let data: NpkJson | null = null;
-      for (let attempt = 1; attempt <= 2 && !data; attempt++) {
-        if (abortRef.current.cancelled) {
-          setIsReadingStep(false);
-          return;
-        }
-        data = await readOnce();
-        if (!data) await new Promise((r) => setTimeout(r, 600));
-      }
+    if (abortRef.current.cancelled) {
+      setIsReadingStep(false);
+      return;
+    }
+
+    const elapsed = Date.now() - startTime;
+    if (elapsed < MIN_READING_DURATION_MS) {
+      await new Promise((r) => setTimeout(r, MIN_READING_DURATION_MS - elapsed));
       if (abortRef.current.cancelled) {
         setIsReadingStep(false);
         return;
       }
+    }
 
-      // Enforce minimum reading duration (same as stakeholder)
-      const elapsed = Date.now() - startTime;
-      if (elapsed < MIN_READING_DURATION_MS) {
-        await new Promise((r) =>
-          setTimeout(r, MIN_READING_DURATION_MS - elapsed)
-        );
-        if (abortRef.current.cancelled) {
-          setIsReadingStep(false);
-          return;
-        }
-      }
-
-      if (!data) {
-        setIsReadingStep(false);
-        setStatusMessage(
-          `Failed read ${stepToRead}. Press button to try again.`
-        );
-        Alert.alert('No Data', 'Walang nabasang data. Subukan ulit.');
-        return;
-      }
-      if (
-        typeof data.n !== 'number' ||
-        typeof data.p !== 'number' ||
-        typeof data.k !== 'number'
-      ) {
-        setIsReadingStep(false);
-        setStatusMessage(
-          `Invalid data ${stepToRead}. Press button to try again.`
-        );
-        Alert.alert(
-          'Invalid Data',
-          `Incomplete NPK at spot ${stepToRead}.`
-        );
-        return;
-      }
-
-      // Save spot result + index for display (like stakeholder)
-      setSpotResult(data);
-      setSpotIndex(stepToRead);
-
-      const newReadings = [...readings, data];
-      setReadings(newReadings);
-      const nextStep = stepToRead + 1;
-
-      if (nextStep > TOTAL_STEPS) {
-        setIsReadingStep(false);
-        processResultsAndNavigate(newReadings);
-      } else {
-        setCurrentStep(nextStep);
-        setStatusMessage(
-          `Read ${stepToRead}/${TOTAL_STEPS} OK. Press for spot ${nextStep}.`
-        );
-        setIsReadingStep(false);
-      }
-    },
-    [
-      selectedFarmerId,
-      isReadingStep,
-      currentStep,
-      readOnce,
-      readings,
-      processResultsAndNavigate,
-    ]
-  );
-
-  const handleStart = async () => {
-    if (!selectedFarmerId) {
+    if (!data) {
+      setIsReadingStep(false);
+      setStatusMessage(`Nawala ang pagbasa sa ${stepToRead}. Pinduta para mosulay balik.`);
       Alert.alert(
-        'Select Farmer',
-        'Please choose a farmer to continue.'
+        'Walay nabasang data',
+        `Wala mi nakakuha ug valid reading sa spot ${stepToRead}. Siguraduhang connected ka sa "${ESP_SSID}" ug itusok ang sensor sa yuta.`
       );
       return;
     }
-    if (currentStep !== 0 || isReadingStep || isInitialLoad) return;
 
+    setSpotResult(data);
+    setSpotIndex(stepToRead);
+
+    const newReadings = [...readings, data];
+    setReadings(newReadings);
+
+    const nextStep = stepToRead + 1;
+    if (nextStep > TOTAL_STEPS) {
+      setIsReadingStep(false);
+      processResultsAndNavigate(newReadings);
+    } else {
+      setCurrentStep(nextStep);
+      setStatusMessage(`OK ang pagbasa ${stepToRead}/${TOTAL_STEPS}. Pinduta para sa spot ${nextStep}.`);
+      setIsReadingStep(false);
+    }
+  }, [currentStep, isReadingStep, readOnce, readings, processResultsAndNavigate]);
+
+  const handleStart = async () => {
+    if (currentStep !== 0 || isReadingStep) return;
     setIsReadingStep(true);
-    setIsInitialLoad(true);
-    setStatusMessage(`Checking connection to ${ESP_SSID}...`);
-
+    setStatusMessage(`Gitan-aw ang koneksyon sa ${ESP_SSID}...`);
     try {
-      await autoConnectToESP32();
+      await ensureConnected();
       if (abortRef.current.cancelled) return;
-
-      setStatusMessage('Preparing sensor, please wait...');
-      await new Promise((r) => setTimeout(r, 3200));
-      if (abortRef.current.cancelled) return;
-
       setCurrentStep(1);
-      setStatusMessage(
-        `Ready to read spot 1/${TOTAL_STEPS}. Press button.`
-      );
+      setStatusMessage(`Andam na para mobasa sa spot 1/${TOTAL_STEPS}. Pinduta ang button.`);
     } catch (err: any) {
       if (abortRef.current.cancelled) return;
-      Alert.alert(
-        'Connection Error',
-        err?.message || 'Could not connect.'
-      );
-      setStatusMessage('Connection failed. Try Start again.');
+      Alert.alert('Error sa Koneksyon', err?.message || `Dili makakonek sa "${ESP_SSID}".`);
+      setStatusMessage('Nawala ang koneksyon. Sulayi ug Start pag-usab.');
     } finally {
-      if (!abortRef.current.cancelled) {
-        setIsReadingStep(false);
-        setIsInitialLoad(false);
-      }
+      if (!abortRef.current.cancelled) setIsReadingStep(false);
     }
   };
 
-  const displayedStep =
-    currentStep === 0
-      ? 0
-      : currentStep > TOTAL_STEPS
-      ? TOTAL_STEPS
-      : currentStep;
+  const displayedStep = currentStep === 0 ? 0 : currentStep > TOTAL_STEPS ? TOTAL_STEPS : currentStep;
 
-  // ---------- UI ----------
+  const fmtPh = (v: any) => {
+    if (v === null || v === undefined) return '0.00';
+    const n = Number(v);
+    return Number.isFinite(n) ? n.toFixed(2) : '0.00';
+  };
+
+  const spotLevelN = spotResult?.levels?.n ?? classifyLevel('N', spotResult?.n);
+  const spotLevelP = spotResult?.levels?.p ?? classifyLevel('P', spotResult?.p);
+  const spotLevelK = spotResult?.levels?.k ?? classifyLevel('K', spotResult?.k);
+
   return (
     <SafeAreaView style={styles.safe}>
-      <ScrollView
-        contentContainerStyle={styles.scrollContent}
-        keyboardShouldPersistTaps="handled"
-        showsVerticalScrollIndicator={false}
-      >
-        <Image
-          source={require('../../../assets/images/fertisense-logo.png')}
-          style={styles.logo}
-        />
+      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+        <Image source={require('../../../assets/images/fertisense-logo.png')} style={styles.logo} />
 
-        {/* Farmer info */}
-        <View style={styles.selectorBox}>
-          <Text style={styles.selectorLabel}>Reading for</Text>
-          <View style={styles.selectorRow}>
-            <Text style={styles.selectorValue} numberOfLines={1}>
-              {selectedFarmerName || '— none —'}
-            </Text>
-
-            {!selectedFarmerId && (
-              <TouchableOpacity
-                style={styles.selectorBtn}
-                onPress={handleOpenFarmerPicker}
-              >
-                <Ionicons
-                  name="people-outline"
-                  size={18}
-                  color="#fff"
-                />
-                <Text style={styles.selectorBtnText}>Choose</Text>
-              </TouchableOpacity>
-            )}
-          </View>
-        </View>
-
-        {/* Reading box – now very close to stakeholder design */}
         <View style={styles.readingBox}>
-          <Text style={styles.title}>Insert Sensor into Soil</Text>
-          <Text style={styles.engSub}>
-            Take {TOTAL_STEPS} readings. Press the button for each
-            spot.
-          </Text>
-          <Text style={styles.tagalogSub}>
-            Kumuha ng {TOTAL_STEPS} readings. Pindutin ang button
-            kada spot.
-          </Text>
+          <Text style={styles.title}>Itusok ang Sensor sa Yuta (Admin)</Text>
+          <Text style={styles.engSub}>Kuhaa ang {TOTAL_STEPS} ka readings. Pinduta ang button kada spot.</Text>
 
           <View style={styles.statusDisplay}>
             <View style={styles.progressCircle}>
               <View style={styles.progressInner}>
-                {isReadingStep || isInitialLoad ? (
-                  <ActivityIndicator
-                    size="small"
-                    color="#2e7d32"
-                    style={styles.circleSpinner}
-                  />
+                {isReadingStep ? (
+                  <ActivityIndicator size="small" color="#2e7d32" style={styles.circleSpinner} />
                 ) : (
-                  <Ionicons
-                    name="leaf-outline"
-                    size={24}
-                    color="#2e7d32"
-                    style={styles.circleSpinner}
-                  />
+                  <Ionicons name="leaf-outline" size={24} color="#2e7d32" style={styles.circleSpinner} />
                 )}
                 <Text style={styles.progressLabel}>Spot</Text>
                 <Text style={styles.progressStep}>
@@ -515,28 +374,15 @@ export default function AdminSensorReadingScreen() {
 
             <Text style={styles.statusText}>{statusMessage}</Text>
 
-            {/* 👇 Spot result + LOW/MEDIUM/HIGH like stakeholder */}
             {spotResult && spotIndex !== null && (
               <View style={styles.spotResultBox}>
-                <Text style={styles.spotResultTitle}>
-                  Result for Spot {spotIndex}
-                </Text>
-                <Text style={styles.spotResultLine}>
-                  🌿 Nitrogen N: {fmt(spotResult.n)}
-                </Text>
-                <Text style={styles.spotResultLine}>
-                  🌱 Phosporus P: {fmt(spotResult.p)}
-                </Text>
-                <Text style={styles.spotResultLine}>
-                  🥬 Potassium K: {fmt(spotResult.k)}
-                </Text>
-                <Text style={styles.spotResultLine}>
-                  💧 pH: {fmtPh(spotResult.ph)}
-                </Text>
-                <Text style={styles.spotResultLine}>
-                  📊 Level – N: {spotLevelN}   P: {spotLevelP}   K:{' '}
-                  {spotLevelK}
-                </Text>
+                <Text style={styles.spotResultTitle}>Resulta sa Spot {spotIndex}</Text>
+
+                <Text style={styles.spotResultLine}>Nitrogen (N): {String(spotLevelN)}</Text>
+                <Text style={styles.spotResultLine}>Posporus (P): {String(spotLevelP)}</Text>
+                <Text style={styles.spotResultLine}>Potassium (K): {String(spotLevelK)}</Text>
+
+                <Text style={styles.spotResultLine}>💧 pH: {fmtPh(spotResult.ph)}</Text>
               </View>
             )}
           </View>
@@ -545,218 +391,62 @@ export default function AdminSensorReadingScreen() {
         <View style={styles.buttonContainer}>
           {currentStep === 0 && (
             <TouchableOpacity
-              style={[
-                styles.actionButton,
-                (isReadingStep || isInitialLoad) &&
-                  styles.disabledButton,
-              ]}
+              style={[styles.actionButton, isReadingStep && styles.disabledButton]}
               onPress={handleStart}
-              disabled={isReadingStep || isInitialLoad}
+              disabled={isReadingStep}
             >
-              <Ionicons
-                name="hardware-chip-outline"
-                size={22}
-                color={
-                  isReadingStep || isInitialLoad ? '#eee' : '#fff'
-                }
-              />
-              <Text
-                style={[
-                  styles.actionButtonText,
-                  (isReadingStep || isInitialLoad) &&
-                    styles.disabledButtonText,
-                ]}
-              >
-                {isReadingStep || isInitialLoad
-                  ? 'Connecting...'
-                  : 'Start Reading'}
+              <Ionicons name="hardware-chip-outline" size={22} color={isReadingStep ? '#eee' : '#fff'} />
+              <Text style={[styles.actionButtonText, isReadingStep && styles.disabledButtonText]}>
+                {isReadingStep ? 'Gisusi...' : 'Sugdi ang Pagbasa'}
               </Text>
             </TouchableOpacity>
           )}
 
           {currentStep > 0 && currentStep <= TOTAL_STEPS && (
             <TouchableOpacity
-              style={[
-                styles.actionButton,
-                isReadingStep && styles.disabledButton,
-              ]}
+              style={[styles.actionButton, isReadingStep && styles.disabledButton]}
               onPress={handleReadNextStep}
               disabled={isReadingStep}
             >
-              <Ionicons
-                name="radio-button-on-outline"
-                size={22}
-                color={isReadingStep ? '#eee' : '#fff'}
-              />
-              <Text
-                style={[
-                  styles.actionButtonText,
-                  isReadingStep && styles.disabledButtonText,
-                ]}
-              >
-                {isReadingStep
-                  ? `Reading Spot ${currentStep}...`
-                  : `Read Spot ${currentStep}/${TOTAL_STEPS}`}
+              <Ionicons name="radio-button-on-outline" size={22} color={isReadingStep ? '#eee' : '#fff'} />
+              <Text style={[styles.actionButtonText, isReadingStep && styles.disabledButtonText]}>
+                {isReadingStep ? `Nagbasa sa Spot ${currentStep}...` : `Basaha ang Spot ${currentStep}/${TOTAL_STEPS}`}
               </Text>
             </TouchableOpacity>
           )}
 
           {currentStep > TOTAL_STEPS && (
-            <TouchableOpacity
-              style={[
-                styles.actionButton,
-                styles.disabledButton,
-              ]}
-              disabled
-            >
-              <ActivityIndicator
-                size="small"
-                color="#eee"
-                style={{ marginRight: 10 }}
-              />
-              <Text
-                style={[
-                  styles.actionButtonText,
-                  styles.disabledButtonText,
-                ]}
-              >
-                Processing...
-              </Text>
+            <TouchableOpacity style={[styles.actionButton, styles.disabledButton]} disabled>
+              <ActivityIndicator size="small" color="#eee" style={{ marginRight: 10 }} />
+              <Text style={[styles.actionButtonText, styles.disabledButtonText]}>Ginaproseso...</Text>
             </TouchableOpacity>
           )}
         </View>
       </ScrollView>
-
-      {/* Farmer Picker Modal */}
-      <Modal
-        visible={pickerOpen}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setPickerOpen(false)}
-      >
-        <View style={styles.modalBackdrop}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Choose a Farmer</Text>
-            <TextInput
-              placeholder="Search name..."
-              placeholderTextColor="#888"
-              style={styles.searchInput}
-              value={filter}
-              onChangeText={setFilter}
-            />
-            <FlatList
-              data={filteredFarmers}
-              keyExtractor={(item) => item._id}
-              style={{ maxHeight: 320 }}
-              renderItem={({ item }) => (
-                <TouchableOpacity
-                  style={styles.farmerRow}
-                  onPress={() => chooseFarmer(item)}
-                >
-                  <Text style={styles.farmerName}>
-                    {item.name}
-                  </Text>
-                  <Text style={styles.farmerId}>
-                    {item._id}
-                  </Text>
-                </TouchableOpacity>
-              )}
-              ListEmptyComponent={
-                <Text
-                  style={{
-                    textAlign: 'center',
-                    color: '#666',
-                    paddingVertical: 16,
-                  }}
-                >
-                  No matches
-                </Text>
-              }
-            />
-            <TouchableOpacity
-              style={styles.closeBtn}
-              onPress={() => setPickerOpen(false)}
-            >
-              <Text style={styles.closeBtnText}>Close</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
     </SafeAreaView>
   );
 }
 
-// ---------- Styles ----------
 const styles = StyleSheet.create({
-  safe: {
-    flex: 1,
-    backgroundColor: '#fff',
-  },
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
-  },
+  safe: { flex: 1, backgroundColor: '#ffffffff' },
   scrollContent: {
     flexGrow: 1,
-    paddingTop: 32,
+    alignItems: 'center',
+    paddingTop: 40,
     paddingHorizontal: 24,
-    paddingBottom: 24,
-    alignItems: 'center',
-    backgroundColor: '#fff',
+    paddingBottom: 32,
+    backgroundColor: '#ffffffff',
   },
-  logo: {
-    width: 180,
-    height: 180,
-    resizeMode: 'contain',
-    marginBottom: -4,
-  },
-
-  selectorBox: {
-    width: '100%',
-    backgroundColor: '#eef7ee',
-    padding: 16,
-    borderRadius: 14,
-    marginBottom: 16,
-  },
-  selectorLabel: {
-    color: '#2e7d32',
-    fontWeight: '700',
-    marginBottom: 8,
-    fontSize: 14,
-  },
-  selectorRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  selectorValue: {
-    color: '#333',
-    fontSize: 14,
-    flex: 1,
-    marginRight: 10,
-  },
-  selectorBtn: {
-    backgroundColor: '#2e7d32',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 22,
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  selectorBtnText: {
-    color: '#fff',
-    marginLeft: 6,
-    fontWeight: '600',
-  },
+  logo: { width: 120, height: 200, resizeMode: 'contain', marginBottom: -10 },
 
   readingBox: {
     backgroundColor: '#f1fbf1',
-    padding: 24,
+    padding: 26,
     borderRadius: 18,
     width: '100%',
-    elevation: 3,
+    elevation: 5,
     alignItems: 'center',
-    marginBottom: 20,
+    marginBottom: 28,
   },
   title: {
     fontSize: 20,
@@ -765,26 +455,9 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginBottom: 12,
   },
-  engSub: {
-    fontSize: 15,
-    color: '#555',
-    textAlign: 'center',
-    marginBottom: 6,
-  },
-  tagalogSub: {
-    fontSize: 13,
-    color: '#555',
-    textAlign: 'center',
-    fontStyle: 'italic',
-    marginBottom: 18,
-  },
+  engSub: { fontSize: 15, color: '#555', textAlign: 'center', marginBottom: 6 },
 
-  statusDisplay: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    width: '100%',
-    marginTop: 4,
-  },
+  statusDisplay: { alignItems: 'center', justifyContent: 'center', width: '100%', marginTop: 4 },
 
   progressCircle: {
     width: 150,
@@ -805,20 +478,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  circleSpinner: {
-    marginBottom: 4,
-  },
-  progressLabel: {
-    fontSize: 14,
-    color: '#2e7d32',
-    fontWeight: '600',
-  },
-  progressStep: {
-    fontSize: 18,
-    color: '#1b5e20',
-    fontWeight: '800',
-    marginTop: 2,
-  },
+  circleSpinner: { marginBottom: 4 },
+  progressLabel: { fontSize: 14, color: '#2e7d32', fontWeight: '600' },
+  progressStep: { fontSize: 18, color: '#1b5e20', fontWeight: '800', marginTop: 2 },
 
   statusText: {
     fontSize: 16,
@@ -828,7 +490,6 @@ const styles = StyleSheet.create({
     marginTop: 5,
   },
 
-  // Spot result like stakeholder
   spotResultBox: {
     marginTop: 10,
     paddingVertical: 8,
@@ -839,24 +500,10 @@ const styles = StyleSheet.create({
     borderColor: '#cde9cf',
     width: '90%',
   },
-  spotResultTitle: {
-    fontWeight: '700',
-    color: '#1b5e20',
-    marginBottom: 4,
-    textAlign: 'center',
-  },
-  spotResultLine: {
-    fontSize: 14,
-    color: '#1b5e20',
-    marginTop: 2,
-  },
+  spotResultTitle: { fontWeight: '700', color: '#1b5e20', marginBottom: 4, textAlign: 'center' },
+  spotResultLine: { fontSize: 14, color: '#1b5e20', marginTop: 2 },
 
-  buttonContainer: {
-    marginTop: 12,
-    marginBottom: 8,
-    alignItems: 'center',
-    width: '100%',
-  },
+  buttonContainer: { width: '100%', alignItems: 'center', marginTop: 8 },
   actionButton: {
     backgroundColor: '#2e7d32',
     flexDirection: 'row',
@@ -868,64 +515,7 @@ const styles = StyleSheet.create({
     elevation: 3,
     minWidth: 250,
   },
-  actionButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-    marginLeft: 8,
-  },
-  disabledButton: {
-    backgroundColor: '#a5d6a7',
-    elevation: 1,
-  },
-  disabledButtonText: {
-    color: '#eee',
-  },
-
-  modalBackdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.35)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-  },
-  modalCard: {
-    width: '100%',
-    backgroundColor: '#fff',
-    borderRadius: 14,
-    padding: 16,
-  },
-  modalTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    marginBottom: 10,
-    color: '#2e7d32',
-  },
-  searchInput: {
-    borderWidth: 1,
-    borderColor: '#ccc',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    marginBottom: 10,
-    color: '#222',
-  },
-  farmerRow: {
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: '#eee',
-  },
-  farmerName: { color: '#222', fontWeight: '600' },
-  farmerId: { color: '#666', fontSize: 12 },
-  closeBtn: {
-    marginTop: 12,
-    backgroundColor: '#e8f5e9',
-    paddingVertical: 10,
-    borderRadius: 10,
-  },
-  closeBtnText: {
-    textAlign: 'center',
-    color: '#2e7d32',
-    fontWeight: '700',
-  },
+  actionButtonText: { color: '#fff', fontSize: 16, fontWeight: '600', marginLeft: 8 },
+  disabledButton: { backgroundColor: '#a5d6a7', elevation: 1 },
+  disabledButtonText: { color: '#eee' },
 });
